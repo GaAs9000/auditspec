@@ -3,9 +3,11 @@ use std::path::{Path, PathBuf};
 
 use auditspec::canonical::{canonical_json, digest, strict_json_loads};
 use auditspec::trust::evaluate_institutional_responses;
-use auditspec::vault::{EvidenceVault, VaultSigner, load_private_key, write_new_private_key};
+use auditspec::vault::{
+    EvidenceVault, VaultSigner, VaultTrustPins, load_private_key, write_new_private_key,
+};
 use auditspec::{AuditSpecError, Result};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use serde_json::{Value, json};
 
 #[derive(Parser)]
@@ -17,6 +19,29 @@ use serde_json::{Value, json};
 struct Cli {
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Args, Debug)]
+struct ExternalPins {
+    #[arg(long)]
+    expected_vault_id: Option<String>,
+    #[arg(long)]
+    expected_manifest_root: Option<String>,
+    #[arg(long)]
+    expected_public_key: Option<String>,
+    #[arg(long)]
+    expected_vault_root: Option<String>,
+}
+
+impl ExternalPins {
+    fn into_vault_pins(self) -> VaultTrustPins {
+        VaultTrustPins {
+            expected_vault_id: self.expected_vault_id,
+            expected_manifest_root: self.expected_manifest_root,
+            expected_public_key_hex: self.expected_public_key,
+            expected_vault_root: self.expected_vault_root,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -107,6 +132,18 @@ enum Command {
         #[arg(long)]
         recorded_at: String,
     },
+    RotateJournalAuthority {
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long)]
+        private_key: PathBuf,
+        #[arg(long)]
+        successor_public_key: String,
+        #[arg(long)]
+        reason_digest: String,
+        #[arg(long)]
+        recorded_at: String,
+    },
     PlaceHold {
         #[arg(long)]
         root: PathBuf,
@@ -144,6 +181,8 @@ enum Command {
         evidence_id: String,
         #[arg(long)]
         evaluated_at: String,
+        #[command(flatten)]
+        pins: ExternalPins,
     },
     DeleteEvidence {
         #[arg(long)]
@@ -182,6 +221,8 @@ enum Command {
         bundle_id: String,
         #[arg(long)]
         audited_at: String,
+        #[command(flatten)]
+        pins: ExternalPins,
     },
     ReverifyJson {
         #[arg(long)]
@@ -192,10 +233,14 @@ enum Command {
         claim_id: String,
         #[arg(long)]
         audited_at: String,
+        #[command(flatten)]
+        pins: ExternalPins,
     },
     Status {
         #[arg(long)]
         root: PathBuf,
+        #[command(flatten)]
+        pins: ExternalPins,
     },
     TrustEvaluate {
         #[arg(long)]
@@ -326,6 +371,17 @@ fn execute(cli: Cli) -> Result<Value> {
             evidence_ids,
             recorded_at,
         } => writable(&root, &private_key)?.create_bundle(&bundle_id, &evidence_ids, &recorded_at),
+        Command::RotateJournalAuthority {
+            root,
+            private_key,
+            successor_public_key,
+            reason_digest,
+            recorded_at,
+        } => writable(&root, &private_key)?.rotate_journal_authority(
+            &successor_public_key,
+            &reason_digest,
+            &recorded_at,
+        ),
         Command::PlaceHold {
             root,
             private_key,
@@ -358,7 +414,9 @@ fn execute(cli: Cli) -> Result<Value> {
             root,
             evidence_id,
             evaluated_at,
-        } => EvidenceVault::open_read_only(&root)?.retention_decision(&evidence_id, &evaluated_at),
+            pins,
+        } => EvidenceVault::open_read_only_with_pins(&root, pins.into_vault_pins())?
+            .retention_decision(&evidence_id, &evaluated_at),
         Command::DeleteEvidence {
             root,
             private_key,
@@ -391,27 +449,38 @@ fn execute(cli: Cli) -> Result<Value> {
             root,
             bundle_id,
             audited_at,
-        } => Ok(EvidenceVault::open_read_only(&root)?
-            .retrieve_for_audit(&bundle_id, &audited_at)?
-            .record),
+            pins,
+        } => Ok(
+            EvidenceVault::open_read_only_with_pins(&root, pins.into_vault_pins())?
+                .retrieve_for_audit(&bundle_id, &audited_at)?
+                .record,
+        ),
         Command::ReverifyJson {
             root,
             bundle_id,
             claim_id,
             audited_at,
-        } => EvidenceVault::open_read_only(&root)?.reverify_json_predicate(
-            &bundle_id,
-            &claim_id,
-            &audited_at,
-        ),
-        Command::Status { root } => {
-            let vault = EvidenceVault::open_read_only(&root)?;
+            pins,
+        } => EvidenceVault::open_read_only_with_pins(&root, pins.into_vault_pins())?
+            .reverify_json_predicate(&bundle_id, &claim_id, &audited_at),
+        Command::Status { root, pins } => {
+            let vault = EvidenceVault::open_read_only_with_pins(&root, pins.into_vault_pins())?;
             let state = vault.replay()?;
+            let assurance = vault.assurance(Some(&state))?;
             Ok(json!({
-                "status": "VALID",
+                "status": assurance["status"],
+                "integrity_status": assurance["integrity_status"],
+                "authentication_scope": assurance["authentication_scope"],
+                "rollback_protection": assurance["rollback_protection"],
+                "external_pin_names": assurance["external_pin_names"],
                 "vault_id": vault.vault_id()?,
+                "manifest_root": vault.manifest_root()?,
                 "event_count": state.event_count,
                 "vault_root": state.vault_root,
+                "initial_public_key_hex": state.initial_public_key_hex,
+                "active_public_key_hex": state.active_public_key_hex,
+                "journal_authority_rotation_count": state.journal_authority_rotations.len(),
+                "time_assurance": "DECLARED_BY_VAULT_AUTHORITY",
                 "component_count": state.component_count(),
                 "evidence_count": state.evidence_count(),
                 "bundle_count": state.bundle_count(),

@@ -184,6 +184,20 @@ def test_vault_reverifies_after_routine_key_rotation(tmp_path: Path) -> None:
     assert result["claim_value"] is True
 
 
+def test_cross_claim_bundle_splice_is_typed_inventory_gap(tmp_path: Path) -> None:
+    vault, _ = _new_vault(tmp_path / "vault")
+    _append(vault)
+    _bundle(vault)
+    result = vault.reverify_json_predicate(
+        "bundle.payment.1", claim_id="claim.other", audited_at=T2
+    )
+    assert result["verdict"] == "INVENTORY_GAP"
+    assert result["primary_failure"] == {
+        "subtype": "CLAIM_EVIDENCE_ABSENT",
+        "claim_id": "claim.other",
+    }
+
+
 def test_retroactive_key_compromise_is_typed_gap(tmp_path: Path) -> None:
     vault, _ = _new_vault(
         tmp_path / "vault",
@@ -334,12 +348,15 @@ def test_bridge_is_evaluated_at_audit_time(
 def test_legal_hold_prevents_physical_deletion(tmp_path: Path) -> None:
     vault, _ = _new_vault(tmp_path / "vault")
     _append(vault)
-    vault.place_legal_hold(
+    hold_event = vault.place_legal_hold(
         hold_id="hold.1",
         evidence_ids=["evidence.payment.1"],
         authority_ref="legal.authority.1",
         reason_digest="3" * 64,
         recorded_at=T2,
+    )
+    assert hold_event["body"]["authority_semantics"] == (
+        "attribution_metadata_asserted_by_vault_authority"
     )
     assert vault.retention_decision("evidence.payment.1", evaluated_at=T2)[
         "status"
@@ -373,6 +390,9 @@ def test_permitted_deletion_returns_evidence_unavailable(tmp_path: Path) -> None
         authority_ref="custody.authority.1",
     )
     assert tombstone["body"]["physical_deleted"] is True
+    assert tombstone["body"]["authority_semantics"] == (
+        "attribution_metadata_asserted_by_vault_authority"
+    )
     retrieval = vault.retrieve_for_audit("bundle.payment.1", audited_at=T2).record
     assert retrieval["primary_failure"]["subtype"] == "EVIDENCE_UNAVAILABLE"
 
@@ -765,6 +785,142 @@ def test_retired_verifier_remains_available_for_existing_contract(tmp_path: Path
     assert result["verdict"] == "SUPPORTED"
 
 
+def test_retired_component_is_historical_only_for_new_capture(tmp_path: Path) -> None:
+    vault, _ = _new_vault(tmp_path / "vault")
+    _append(vault)
+    vault.archive_component(
+        kind="verifier",
+        component_id="payment-predicate",
+        version="2",
+        content=json.dumps(
+            {
+                "schema": "AuditSpec-vault-json-predicate-verifier-v1",
+                "predicate": PREDICATE,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode(),
+        media_type="application/json",
+        metadata={"archive_executable": True},
+        recorded_at=T1,
+    )
+    vault.retire_component(
+        component_ref="verifier:payment-predicate:1",
+        replacement_ref="verifier:payment-predicate:2",
+        impacted_claim_ids=["claim.payment.once"],
+        future_unsupported_claim_ids=["claim.payment.future"],
+        recorded_at=T1,
+    )
+
+    with pytest.raises(EvidenceVaultError, match="retired component"):
+        _append(vault, evidence_id="evidence.payment.retired")
+
+    vault.append_evidence(
+        evidence_id="evidence.payment.replacement",
+        claim_id="claim.payment.once",
+        run_id="run.payment.2",
+        content=b'{"settled_count":1}',
+        media_type="application/json",
+        schema_ref="schema:payment-evidence:1",
+        key_ref="key:producer-key:1",
+        verifier_ref="verifier:payment-predicate:2",
+        policy_ref="policy:payment-policy:1",
+        world_scope={
+            "type": "declared_closed_world",
+            "scope_commitment": "1" * 64,
+            "universe_root": "2" * 64,
+        },
+        captured_at=T0,
+        minimum_retain_until=T1,
+        deletion_required_by=T3,
+        recorded_at=T1,
+    )
+    assert "evidence.payment.replacement" in vault.replay()["evidence"]
+
+
+def test_external_pin_distinguishes_authentication_from_self_consistency(
+    tmp_path: Path,
+) -> None:
+    source, _ = _new_vault(tmp_path / "source")
+    replacement, _ = _new_vault(tmp_path / "replacement")
+
+    assert EvidenceVault.open_read_only(replacement.root).assurance()["status"] == (
+        "SELF_CONSISTENT"
+    )
+    authenticated = EvidenceVault.open_read_only(
+        source.root,
+        expected_vault_id=source.vault_id,
+        expected_manifest_root=source.manifest_root,
+        expected_public_key_hex=source.initial_public_key_hex,
+    )
+    assert authenticated.assurance()["status"] == "EXTERNALLY_AUTHENTICATED"
+    authority_only = EvidenceVault.open_read_only(
+        source.root,
+        expected_public_key_hex=source.initial_public_key_hex,
+    ).assurance()
+    assert authority_only["status"] == "AUTHORITY_PINNED"
+    assert authority_only["authentication_scope"] == "SIGNING_AUTHORITY"
+    assert authority_only["rollback_protection"] is False
+    with pytest.raises(EvidenceVaultError, match="external manifest root pin mismatch"):
+        EvidenceVault.open_read_only(
+            replacement.root,
+            expected_vault_id=replacement.vault_id,
+            expected_manifest_root=source.manifest_root,
+        )
+    with pytest.raises(EvidenceVaultError, match="requires a manifest"):
+        EvidenceVault.open_read_only(source.root, expected_vault_id=source.vault_id)
+
+
+def test_vault_root_pin_detects_snapshot_advance_or_rollback(tmp_path: Path) -> None:
+    vault, _ = _new_vault(tmp_path / "vault")
+    pinned_root = vault.replay()["vault_root"]
+    pinned = EvidenceVault.open_read_only(
+        vault.root, expected_vault_root=pinned_root
+    ).assurance()
+    assert pinned["authentication_scope"] == "SNAPSHOT"
+    assert pinned["rollback_protection"] is True
+    _append(vault)
+    with pytest.raises(EvidenceVaultError, match="external vault root pin mismatch"):
+        EvidenceVault.open_read_only(vault.root, expected_vault_root=pinned_root)
+
+
+def test_journal_authority_rotation_chains_to_successor_key(tmp_path: Path) -> None:
+    vault, original = _new_vault(tmp_path / "vault")
+    successor = VaultSigner.generate()
+    rotation = vault.rotate_journal_authority(
+        successor_public_key_hex=successor.public_key_hex,
+        reason_digest="7" * 64,
+        recorded_at=T1,
+    )
+    assert rotation["signature"]["public_key_hex"] == original.public_key_hex
+    with pytest.raises(EvidenceVaultError, match="active journal authority"):
+        vault.archive_component(
+            kind="policy",
+            component_id="stale-signer",
+            version="1",
+            content=b"x",
+            media_type="text/plain",
+            metadata={},
+            recorded_at=T1,
+        )
+
+    rotated = EvidenceVault(vault.root, signer=successor)
+    rotated.archive_component(
+        kind="policy",
+        component_id="successor-signer",
+        version="1",
+        content=b"x",
+        media_type="text/plain",
+        metadata={},
+        recorded_at=T1,
+    )
+    authority = rotated.replay()["journal_authority"]
+    assert authority["rotation_count"] == 1
+    assert authority["active_public_key_hex"] == successor.public_key_hex
+    with pytest.raises(EvidenceVaultError, match="active journal authority"):
+        EvidenceVault(vault.root, signer=original)
+
+
 def test_event_tampering_is_rejected_by_read_only_replay(tmp_path: Path) -> None:
     vault, _ = _new_vault(tmp_path / "vault")
     path = sorted((vault.root / "events").glob("*.json"))[0]
@@ -850,8 +1006,25 @@ def test_standalone_cli_generates_external_key_and_opens_status(
     assert json.loads(capsys.readouterr().out)["status"] == "VAULT_CREATED"
     assert vault_cli(["status", "--root", str(root)]) == 0
     status = json.loads(capsys.readouterr().out)
-    assert status["status"] == "VALID"
+    assert status["status"] == "SELF_CONSISTENT"
+    assert status["integrity_status"] == "VALID"
     assert status["event_count"] == 0
+
+    manifest = json.loads((root / "vault.json").read_text(encoding="utf-8"))
+    assert vault_cli(
+        [
+            "status",
+            "--root",
+            str(root),
+            "--expected-vault-id",
+            "vault.cli",
+            "--expected-manifest-root",
+            manifest["manifest_root"],
+        ]
+    ) == 0
+    authenticated = json.loads(capsys.readouterr().out)
+    assert authenticated["status"] == "EXTERNALLY_AUTHENTICATED"
+    assert authenticated["external_pin_names"] == ["vault_id", "manifest_root"]
 
 
 def test_cli_refuses_overexposed_private_key(

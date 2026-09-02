@@ -11,6 +11,7 @@ PUBLIC_TESTS = (
     "tests/test_baselines.py",
     "tests/test_compiler.py",
     "tests/test_core_evidence_vault.py",
+    "tests/test_end_to_end_quickstart.py",
     "tests/test_vault_state_model.py",
     "tests/test_credit_runtime.py",
     "tests/test_extension_manifest.py",

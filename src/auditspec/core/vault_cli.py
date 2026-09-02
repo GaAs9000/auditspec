@@ -75,6 +75,13 @@ def _parser() -> argparse.ArgumentParser:
     bundle.add_argument("--evidence-id", action="append", required=True)
     bundle.add_argument("--recorded-at", required=True)
 
+    rotate = sub.add_parser("rotate-journal-authority")
+    _root(rotate)
+    _private_key(rotate)
+    rotate.add_argument("--successor-public-key", required=True)
+    rotate.add_argument("--reason-digest", required=True)
+    rotate.add_argument("--recorded-at", required=True)
+
     hold = sub.add_parser("place-hold")
     _root(hold)
     _private_key(hold)
@@ -94,6 +101,7 @@ def _parser() -> argparse.ArgumentParser:
 
     retention = sub.add_parser("retention-decision")
     _root(retention)
+    _external_pins(retention)
     retention.add_argument("--evidence-id", required=True)
     retention.add_argument("--evaluated-at", required=True)
 
@@ -111,17 +119,20 @@ def _parser() -> argparse.ArgumentParser:
 
     retrieve = sub.add_parser("retrieve")
     _root(retrieve)
+    _external_pins(retrieve)
     retrieve.add_argument("--bundle-id", required=True)
     retrieve.add_argument("--audited-at", required=True)
 
     reverify = sub.add_parser("reverify-json")
     _root(reverify)
+    _external_pins(reverify)
     reverify.add_argument("--bundle-id", required=True)
     reverify.add_argument("--claim-id", required=True)
     reverify.add_argument("--audited-at", required=True)
 
     status = sub.add_parser("status")
     _root(status)
+    _external_pins(status)
     return parser
 
 
@@ -131,6 +142,13 @@ def _root(parser: argparse.ArgumentParser) -> None:
 
 def _private_key(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--private-key", type=Path, required=True)
+
+
+def _external_pins(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--expected-vault-id")
+    parser.add_argument("--expected-manifest-root")
+    parser.add_argument("--expected-public-key")
+    parser.add_argument("--expected-vault-root")
 
 
 def _dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
@@ -162,7 +180,13 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
             "root": str(vault.root),
         }
     vault = (
-        EvidenceVault.open_read_only(args.root)
+        EvidenceVault.open_read_only(
+            args.root,
+            expected_vault_id=getattr(args, "expected_vault_id", None),
+            expected_manifest_root=getattr(args, "expected_manifest_root", None),
+            expected_public_key_hex=getattr(args, "expected_public_key", None),
+            expected_vault_root=getattr(args, "expected_vault_root", None),
+        )
         if command in {"retention-decision", "retrieve", "reverify-json", "status"}
         else EvidenceVault(args.root, signer=_load_signer(args.private_key))
     )
@@ -197,6 +221,12 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
         return vault.create_bundle(
             bundle_id=args.bundle_id,
             evidence_ids=args.evidence_id,
+            recorded_at=args.recorded_at,
+        )
+    if command == "rotate-journal-authority":
+        return vault.rotate_journal_authority(
+            successor_public_key_hex=args.successor_public_key,
+            reason_digest=args.reason_digest,
             recorded_at=args.recorded_at,
         )
     if command == "place-hold":
@@ -235,11 +265,23 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
         )
     if command == "status":
         state = vault.replay()
+        assurance = vault.assurance(state)
         return {
-            "status": "VALID",
+            "status": assurance["status"],
+            "integrity_status": assurance["integrity_status"],
+            "authentication_scope": assurance["authentication_scope"],
+            "rollback_protection": assurance["rollback_protection"],
+            "external_pin_names": assurance["external_pin_names"],
             "vault_id": vault.vault_id,
+            "manifest_root": vault.manifest_root,
             "event_count": state["event_count"],
             "vault_root": state["vault_root"],
+            "initial_public_key_hex": assurance["initial_public_key_hex"],
+            "active_public_key_hex": assurance["active_public_key_hex"],
+            "journal_authority_rotation_count": assurance[
+                "journal_authority_rotation_count"
+            ],
+            "time_assurance": assurance["time_assurance"],
             "component_count": len(state["components"]),
             "evidence_count": len(state["evidence"]),
             "bundle_count": len(state["bundles"]),

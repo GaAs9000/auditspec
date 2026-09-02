@@ -6,7 +6,7 @@ use auditspec::canonical::canonical_bytes;
 use auditspec::canonical::digest;
 use auditspec::canonical::raw_sha256;
 use auditspec::trust::evaluate_institutional_responses;
-use auditspec::vault::{EvidenceVault, VaultSigner};
+use auditspec::vault::{EvidenceVault, VaultSigner, VaultTrustPins};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -177,6 +177,14 @@ fn consumer_flow_reverifies_and_fails_closed() {
     assert_eq!(result["status"], "REVERIFIED_AT_AUDIT_TIME");
     assert_eq!(result["verdict"], "SUPPORTED");
     assert_eq!(result["claim_value"], true);
+    let splice = vault
+        .reverify_json_predicate("bundle.payment.1", "claim.other", T2)
+        .unwrap();
+    assert_eq!(splice["verdict"], "INVENTORY_GAP");
+    assert_eq!(
+        splice["primary_failure"]["subtype"],
+        "CLAIM_EVIDENCE_ABSENT"
+    );
 
     let compromised = new_vault(
         &temp,
@@ -320,7 +328,7 @@ fn retention_hold_deletion_and_retirement_are_public_operations() {
     let temp = TempDir::new().unwrap();
     let vault = new_vault(&temp, "retention", routine_key(), None);
     append_and_bundle(&vault, false, T2);
-    vault
+    let hold = vault
         .place_legal_hold(
             "hold.1",
             &["evidence.payment.1".to_owned()],
@@ -329,6 +337,10 @@ fn retention_hold_deletion_and_retirement_are_public_operations() {
             T1,
         )
         .unwrap();
+    assert_eq!(
+        hold["body"]["authority_semantics"],
+        "attribution_metadata_asserted_by_vault_authority"
+    );
     assert_eq!(
         vault.retention_decision("evidence.payment.1", T2).unwrap()["status"],
         "LEGAL_HOLD"
@@ -345,6 +357,10 @@ fn retention_hold_deletion_and_retirement_are_public_operations() {
         )
         .unwrap();
     assert_eq!(tombstone["body"]["physical_deleted"], true);
+    assert_eq!(
+        tombstone["body"]["authority_semantics"],
+        "attribution_metadata_asserted_by_vault_authority"
+    );
     let result = vault
         .reverify_json_predicate("bundle.payment.1", "claim.payment.once", T2)
         .unwrap();
@@ -369,6 +385,131 @@ fn retention_hold_deletion_and_retirement_are_public_operations() {
             .reverify_json_predicate("bundle.payment.1", "claim.payment.once", T2)
             .unwrap()["verdict"],
         "SUPPORTED"
+    );
+    let error = retirement
+        .append_evidence(
+            "evidence.payment.future",
+            "claim.payment.future",
+            "run.payment.future",
+            br#"{"settled_count":1}"#,
+            "application/json",
+            "schema:payment-evidence:1",
+            "key:producer-key:1",
+            "verifier:payment-predicate:1",
+            "policy:payment-policy:1",
+            json!({
+                "type": "declared_closed_world",
+                "scope_commitment": "1".repeat(64),
+                "universe_root": "2".repeat(64)
+            }),
+            T0,
+            T1,
+            T3,
+            T1,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("retired component"));
+}
+
+#[test]
+fn external_pin_and_journal_rotation_close_directory_substitution() {
+    let temp = TempDir::new().unwrap();
+    let original = new_vault(&temp, "pinned", routine_key(), None);
+    let replacement = new_vault(&temp, "replacement", routine_key(), None);
+    let original_manifest: Value =
+        serde_json::from_str(&fs::read_to_string(original.root().join("vault.json")).unwrap())
+            .unwrap();
+    let replacement_manifest: Value =
+        serde_json::from_str(&fs::read_to_string(replacement.root().join("vault.json")).unwrap())
+            .unwrap();
+
+    let self_consistent = replacement.assurance(None).unwrap();
+    assert_eq!(self_consistent["status"], "SELF_CONSISTENT");
+    let authenticated = EvidenceVault::open_read_only_with_pins(
+        original.root(),
+        VaultTrustPins {
+            expected_vault_id: Some("vault.pinned".to_owned()),
+            expected_manifest_root: Some(
+                original_manifest["manifest_root"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+            ),
+            expected_public_key_hex: Some(
+                original_manifest["public_key_hex"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+            ),
+            expected_vault_root: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        authenticated.assurance(None).unwrap()["status"],
+        "EXTERNALLY_AUTHENTICATED"
+    );
+    let authority_only = EvidenceVault::open_read_only_with_pins(
+        original.root(),
+        VaultTrustPins {
+            expected_public_key_hex: Some(
+                original_manifest["public_key_hex"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+            ),
+            ..VaultTrustPins::default()
+        },
+    )
+    .unwrap()
+    .assurance(None)
+    .unwrap();
+    assert_eq!(authority_only["status"], "AUTHORITY_PINNED");
+    assert_eq!(authority_only["authentication_scope"], "SIGNING_AUTHORITY");
+    let mismatch = EvidenceVault::open_read_only_with_pins(
+        replacement.root(),
+        VaultTrustPins {
+            expected_vault_id: Some("vault.replacement".to_owned()),
+            expected_manifest_root: Some(
+                original_manifest["manifest_root"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+            ),
+            ..VaultTrustPins::default()
+        },
+    )
+    .err()
+    .expect("replacement must fail the external manifest pin");
+    assert!(mismatch.to_string().contains("manifest root pin mismatch"));
+    assert_ne!(
+        original_manifest["manifest_root"],
+        replacement_manifest["manifest_root"]
+    );
+
+    let successor = VaultSigner::from_bytes(&[8_u8; 32]).unwrap();
+    original
+        .rotate_journal_authority(&successor.public_key_hex(), &"7".repeat(64), T1)
+        .unwrap();
+    let stale = original
+        .archive_component("policy", "stale", "1", b"x", "text/plain", json!({}), T1)
+        .unwrap_err();
+    assert!(stale.to_string().contains("active journal authority"));
+    let rotated = EvidenceVault::open_with_signer(original.root(), Some(successor)).unwrap();
+    rotated
+        .archive_component(
+            "policy",
+            "successor",
+            "1",
+            b"x",
+            "text/plain",
+            json!({}),
+            T1,
+        )
+        .unwrap();
+    assert_eq!(
+        rotated.replay().unwrap().journal_authority_rotations.len(),
+        1
     );
 }
 

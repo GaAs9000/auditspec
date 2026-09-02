@@ -1,7 +1,10 @@
-.PHONY: install test verify rust
+.PHONY: install quickstart test verify rust
 
 install:
 	python -m pip install -e '.[all]'
+
+quickstart:
+	python examples/end_to_end.py
 
 test:
 	python scripts/run_public_ci.py

@@ -40,8 +40,19 @@ RETRIEVAL_SCHEMA = "AuditSpec-evidence-vault-audit-retrieval-v1"
 REVERIFY_SCHEMA = "AuditSpec-evidence-vault-reverification-v1"
 DELETION_INTENT_SCHEMA_V1 = "AuditSpec-evidence-vault-deletion-intent-v1"
 DELETION_INTENT_SCHEMA_V2 = "AuditSpec-evidence-vault-deletion-intent-v2"
+DELETION_INTENT_SCHEMA_V3 = "AuditSpec-evidence-vault-deletion-intent-v3"
 DELETION_TOMBSTONE_SCHEMA_V1 = "AuditSpec-evidence-vault-deletion-tombstone-v1"
 DELETION_TOMBSTONE_SCHEMA_V2 = "AuditSpec-evidence-vault-deletion-tombstone-v2"
+DELETION_TOMBSTONE_SCHEMA_V3 = "AuditSpec-evidence-vault-deletion-tombstone-v3"
+JOURNAL_AUTHORITY_ROTATION_SCHEMA = (
+    "AuditSpec-evidence-vault-journal-authority-rotation-v1"
+)
+LEGAL_HOLD_SCHEMA_V2 = "AuditSpec-evidence-vault-legal-hold-v2"
+LEGAL_HOLD_RELEASE_SCHEMA_V2 = "AuditSpec-evidence-vault-legal-hold-release-v2"
+RETIREMENT_SCHEMA_V2 = "AuditSpec-evidence-vault-retirement-certificate-v2"
+AUTHORITY_ATTRIBUTION_SEMANTICS = (
+    "attribution_metadata_asserted_by_vault_authority"
+)
 
 COMPONENT_KINDS = {"bridge", "key", "policy", "schema", "verifier"}
 WORLD_SCOPES = {"declared_closed_world", "externally_bridged_world"}
@@ -50,6 +61,79 @@ ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,254}\Z")
 
 class EvidenceVaultError(ValueError):
     """A vault command, journal entry, or archived object is invalid."""
+
+
+@dataclass(frozen=True)
+class VaultTrustPins:
+    """Caller-owned expectations used to authenticate a Vault directory.
+
+    A vault id is descriptive, not cryptographic. At least one digest or key
+    expectation is therefore required whenever any external expectation is
+    supplied.
+    """
+
+    expected_vault_id: str | None = None
+    expected_manifest_root: str | None = None
+    expected_public_key_hex: str | None = None
+    expected_vault_root: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.expected_vault_id is not None:
+            _identifier(self.expected_vault_id, "expected_vault_id")
+        for value, label in (
+            (self.expected_manifest_root, "expected_manifest_root"),
+            (self.expected_vault_root, "expected_vault_root"),
+        ):
+            if value is not None:
+                _sha256(value, label)
+        if self.expected_public_key_hex is not None:
+            _public_key(self.expected_public_key_hex, "expected_public_key_hex")
+        if self.expected_vault_id is not None and not self.has_cryptographic_pin:
+            raise EvidenceVaultError(
+                "expected_vault_id requires a manifest, public-key, or vault-root pin"
+            )
+
+    @property
+    def has_cryptographic_pin(self) -> bool:
+        return any(
+            value is not None
+            for value in (
+                self.expected_manifest_root,
+                self.expected_public_key_hex,
+                self.expected_vault_root,
+            )
+        )
+
+    @property
+    def names(self) -> list[str]:
+        return [
+            name
+            for name, value in (
+                ("vault_id", self.expected_vault_id),
+                ("manifest_root", self.expected_manifest_root),
+                ("public_key", self.expected_public_key_hex),
+                ("vault_root", self.expected_vault_root),
+            )
+            if value is not None
+        ]
+
+    @property
+    def authentication_status(self) -> str:
+        if self.expected_vault_root is not None or self.expected_manifest_root is not None:
+            return "EXTERNALLY_AUTHENTICATED"
+        if self.expected_public_key_hex is not None:
+            return "AUTHORITY_PINNED"
+        return "SELF_CONSISTENT"
+
+    @property
+    def authentication_scope(self) -> str:
+        if self.expected_vault_root is not None:
+            return "SNAPSHOT"
+        if self.expected_manifest_root is not None:
+            return "GENESIS"
+        if self.expected_public_key_hex is not None:
+            return "SIGNING_AUTHORITY"
+        return "INTERNAL_ONLY"
 
 
 def _locked_mutation(method: Any) -> Any:
@@ -96,15 +180,39 @@ class AuditRetrieval:
 class EvidenceVault:
     """Signed append-only evidence archive with deterministic state replay."""
 
-    def __init__(self, root: str | Path, *, signer: VaultSigner | None = None) -> None:
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        signer: VaultSigner | None = None,
+        expected_vault_id: str | None = None,
+        expected_manifest_root: str | None = None,
+        expected_public_key_hex: str | None = None,
+        expected_vault_root: str | None = None,
+    ) -> None:
         self.root = Path(root).resolve()
         self.signer = signer
+        self._trust_pins = VaultTrustPins(
+            expected_vault_id=expected_vault_id,
+            expected_manifest_root=expected_manifest_root,
+            expected_public_key_hex=expected_public_key_hex,
+            expected_vault_root=expected_vault_root,
+        )
         self._manifest = self._load_manifest()
-        if signer is not None and signer.public_key_hex != self._manifest["public_key_hex"]:
-            raise EvidenceVaultError("vault signer does not match manifest public key")
+        self._verify_manifest_pins()
         if signer is not None:
             with self._locked():
+                state = self.replay()
+                self._verify_vault_root_pin(state)
+                if signer.public_key_hex != state["journal_authority"][
+                    "active_public_key_hex"
+                ]:
+                    raise EvidenceVaultError(
+                        "vault signer does not match active journal authority"
+                    )
                 self._recover_locked()
+        elif self._trust_pins.has_cryptographic_pin:
+            self._verify_vault_root_pin(self.replay())
 
     @classmethod
     def create(
@@ -143,12 +251,91 @@ class EvidenceVault:
         return cls(target, signer=signer)
 
     @classmethod
-    def open_read_only(cls, root: str | Path) -> "EvidenceVault":
-        return cls(root, signer=None)
+    def open_read_only(
+        cls,
+        root: str | Path,
+        *,
+        expected_vault_id: str | None = None,
+        expected_manifest_root: str | None = None,
+        expected_public_key_hex: str | None = None,
+        expected_vault_root: str | None = None,
+    ) -> "EvidenceVault":
+        return cls(
+            root,
+            signer=None,
+            expected_vault_id=expected_vault_id,
+            expected_manifest_root=expected_manifest_root,
+            expected_public_key_hex=expected_public_key_hex,
+            expected_vault_root=expected_vault_root,
+        )
 
     @property
     def vault_id(self) -> str:
         return str(self._manifest["vault_id"])
+
+    @property
+    def manifest_root(self) -> str:
+        return str(self._manifest["manifest_root"])
+
+    @property
+    def initial_public_key_hex(self) -> str:
+        return str(self._manifest["public_key_hex"])
+
+    def assurance(self, state: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        """Return the exact trust level established by this open operation."""
+
+        current = self.replay() if state is None else state
+        self._verify_vault_root_pin(current)
+        return {
+            "schema": "AuditSpec-evidence-vault-assurance-v1",
+            "status": self._trust_pins.authentication_status,
+            "authentication_scope": self._trust_pins.authentication_scope,
+            "rollback_protection": (
+                self._trust_pins.expected_vault_root is not None
+            ),
+            "integrity_status": "VALID",
+            "external_pin_names": self._trust_pins.names,
+            "vault_id": self.vault_id,
+            "manifest_root": self.manifest_root,
+            "vault_root": current["vault_root"],
+            "initial_public_key_hex": self.initial_public_key_hex,
+            "active_public_key_hex": current["journal_authority"][
+                "active_public_key_hex"
+            ],
+            "journal_authority_rotation_count": current["journal_authority"][
+                "rotation_count"
+            ],
+            "time_assurance": "DECLARED_BY_VAULT_AUTHORITY",
+        }
+
+    @_locked_mutation
+    def rotate_journal_authority(
+        self,
+        *,
+        successor_public_key_hex: str,
+        reason_digest: str,
+        recorded_at: str,
+    ) -> dict[str, Any]:
+        """Authorize the key that signs every event after this rotation event."""
+
+        successor = _public_key(
+            successor_public_key_hex, "successor_public_key_hex"
+        )
+        _sha256(reason_digest, "reason_digest")
+        _instant(recorded_at)
+        state = self.replay()
+        authority = state["journal_authority"]
+        if successor in authority["public_key_history"]:
+            raise EvidenceVaultError("journal authority key was already used")
+        body = {
+            "schema": JOURNAL_AUTHORITY_ROTATION_SCHEMA,
+            "predecessor_public_key_hex": authority["active_public_key_hex"],
+            "successor_public_key_hex": successor,
+            "reason_digest": reason_digest,
+        }
+        return self._append_event(
+            "JOURNAL_AUTHORITY_ROTATED", body, recorded_at=recorded_at
+        )
 
     @_locked_mutation
     def archive_component(
@@ -239,7 +426,20 @@ class EvidenceVault:
                 or component["body"]["kind"] != expected_kinds[name]
             ):
                 raise EvidenceVaultError(f"{name} is unresolved or has wrong kind")
+            self._require_capture_eligible_component(
+                state,
+                component_ref=reference,
+                claim_id=claim_id,
+                field_name=name,
+            )
         scope = _world_scope(world_scope, components=state["components"])
+        if scope["type"] == "externally_bridged_world":
+            self._require_capture_eligible_component(
+                state,
+                component_ref=scope["bridge_ref"],
+                claim_id=claim_id,
+                field_name="bridge_ref",
+            )
         object_ref = self._put_object(content, media_type=media_type)
         body = {
             "schema": EVIDENCE_SCHEMA,
@@ -324,10 +524,11 @@ class EvidenceVault:
         ):
             raise EvidenceVaultError("legal hold references unknown evidence")
         body = {
-            "schema": "AuditSpec-evidence-vault-legal-hold-v1",
+            "schema": LEGAL_HOLD_SCHEMA_V2,
             "hold_id": hold_id,
             "evidence_ids": ids,
             "authority_ref": authority_ref,
+            "authority_semantics": AUTHORITY_ATTRIBUTION_SEMANTICS,
             "reason_digest": reason_digest,
         }
         return self._append_event("LEGAL_HOLD_PLACED", body, recorded_at=recorded_at)
@@ -349,9 +550,10 @@ class EvidenceVault:
         if hold is None or hold["released"]:
             raise EvidenceVaultError("legal hold is absent or already released")
         body = {
-            "schema": "AuditSpec-evidence-vault-legal-hold-release-v1",
+            "schema": LEGAL_HOLD_RELEASE_SCHEMA_V2,
             "hold_id": hold_id,
             "authority_ref": authority_ref,
+            "authority_semantics": AUTHORITY_ATTRIBUTION_SEMANTICS,
             "release_reason_digest": release_reason_digest,
             "placed_event_root": hold["placed_event_root"],
         }
@@ -442,12 +644,13 @@ class EvidenceVault:
             if not path.is_file() or path.is_symlink():
                 raise EvidenceVaultError("evidence object is already unavailable")
         intent_body = {
-            "schema": DELETION_INTENT_SCHEMA_V2,
+            "schema": DELETION_INTENT_SCHEMA_V3,
             "evidence_id": evidence_id,
             "deleted_at": deleted_at,
             "object_sha256": object_ref["sha256"],
             "deletion_basis": deletion_basis,
             "authority_ref": authority_ref,
+            "authority_semantics": AUTHORITY_ATTRIBUTION_SEMANTICS,
             "retention_decision": decision,
             "physical_delete_required": physical_delete_required,
             "retained_by_live_evidence_ids": other_live_refs,
@@ -480,16 +683,28 @@ class EvidenceVault:
             raise EvidenceVaultError("component is already retired")
         if replacement_ref is not None and replacement_ref not in state["components"]:
             raise EvidenceVaultError("replacement component is unknown")
+        if replacement_ref == component_ref:
+            raise EvidenceVaultError("replacement component must differ")
+        if replacement_ref is not None:
+            if replacement_ref in state["retirements"]:
+                raise EvidenceVaultError("replacement component is retired")
+            if (
+                state["components"][replacement_ref]["body"]["kind"]
+                != state["components"][component_ref]["body"]["kind"]
+            ):
+                raise EvidenceVaultError("replacement component has wrong kind")
         impacted = sorted(set(impacted_claim_ids))
         unsupported = sorted(set(future_unsupported_claim_ids))
         body = {
-            "schema": "AuditSpec-evidence-vault-retirement-certificate-v1",
+            "schema": RETIREMENT_SCHEMA_V2,
             "component_ref": component_ref,
             "replacement_ref": replacement_ref,
             "impacted_claim_ids": impacted,
             "future_unsupported_claim_ids": unsupported,
             "archive_object_ref": state["components"][component_ref]["body"]["object_ref"],
             "existing_contracts_reverify_before_retirement": True,
+            "future_capture_policy": "reject_retired_reference",
+            "retired_at": recorded_at,
         }
         return self._append_event("COMPONENT_RETIRED", body, recorded_at=recorded_at)
 
@@ -541,6 +756,7 @@ class EvidenceVault:
             )
             material[evidence_id] = data
         gaps = _deduplicate_gaps(gaps)
+        vault_assurance = self.assurance(state)
         record = {
             "schema": RETRIEVAL_SCHEMA,
             "vault_id": self.vault_id,
@@ -554,7 +770,12 @@ class EvidenceVault:
             "retrieved_evidence_count": len(material),
             "journal_event_count": state["event_count"],
             "vault_root": state["vault_root"],
+            "vault_authentication_status": vault_assurance["status"],
+            "vault_authentication_scope": vault_assurance["authentication_scope"],
+            "vault_rollback_protection": vault_assurance["rollback_protection"],
+            "external_pin_names": vault_assurance["external_pin_names"],
             "remaining_unproven": [
+                "capture_truth",
                 "open_world_inventory_completeness"
             ],
         }
@@ -576,6 +797,16 @@ class EvidenceVault:
             "claim_id": claim_id,
             "audited_at": audited_at,
             "retrieval_proof_digest": retrieval.record["proof_digest"],
+            "vault_authentication_status": retrieval.record[
+                "vault_authentication_status"
+            ],
+            "vault_authentication_scope": retrieval.record[
+                "vault_authentication_scope"
+            ],
+            "vault_rollback_protection": retrieval.record[
+                "vault_rollback_protection"
+            ],
+            "external_pin_names": retrieval.record["external_pin_names"],
         }
         if retrieval.record["status"] != "READY_FOR_REVERIFICATION":
             body = {
@@ -596,7 +827,18 @@ class EvidenceVault:
             if state["evidence"][item]["body"]["claim_id"] == claim_id
         ]
         if not evidence_records:
-            raise EvidenceVaultError("bundle has no evidence for claim")
+            body = {
+                **base,
+                "status": "INVENTORY_GAP",
+                "verdict": "INVENTORY_GAP",
+                "claim_value": None,
+                "primary_failure": {
+                    "subtype": "CLAIM_EVIDENCE_ABSENT",
+                    "claim_id": claim_id,
+                },
+                "additional_detected_failures": [],
+            }
+            return {**body, "proof_digest": digest(REVERIFY_SCHEMA, body)}
         verifier_refs = {row["verifier_ref"] for row in evidence_records}
         if len(verifier_refs) != 1:
             raise EvidenceVaultError("claim evidence has multiple verifier archives")
@@ -629,9 +871,10 @@ class EvidenceVault:
         return {**body, "proof_digest": digest(REVERIFY_SCHEMA, body)}
 
     def replay(self) -> dict[str, Any]:
-        public = Ed25519PublicKey.from_public_bytes(
-            bytes.fromhex(self._manifest["public_key_hex"])
-        )
+        initial_public_key_hex = self.initial_public_key_hex
+        active_public_key_hex = initial_public_key_hex
+        public_key_history = [initial_public_key_hex]
+        rotations: list[dict[str, Any]] = []
         events = []
         previous = None
         for sequence, path in enumerate(sorted((self.root / "events").glob("*.json")), 1):
@@ -639,18 +882,39 @@ class EvidenceVault:
             if not path.name.startswith(expected_name_prefix) or path.is_symlink():
                 raise EvidenceVaultError("vault event filename sequence is invalid")
             event = strict_json_loads(path.read_text(encoding="utf-8"))
+            public = Ed25519PublicKey.from_public_bytes(
+                bytes.fromhex(active_public_key_hex)
+            )
             _verify_event(
                 event,
                 public,
                 sequence=sequence,
                 previous=previous,
                 expected_vault_id=self.vault_id,
-                expected_public_key_hex=self._manifest["public_key_hex"],
+                expected_public_key_hex=active_public_key_hex,
             )
             if path.name != f"{sequence:020d}-{event['event_root']}.json":
                 raise EvidenceVaultError("vault event filename/root mismatch")
             events.append(event)
             previous = event["event_root"]
+            if event["event_type"] == "JOURNAL_AUTHORITY_ROTATED":
+                successor = _validate_journal_authority_rotation(
+                    event["body"],
+                    predecessor_public_key_hex=active_public_key_hex,
+                    public_key_history=public_key_history,
+                )
+                rotations.append(
+                    {
+                        "sequence": sequence,
+                        "event_root": event["event_root"],
+                        "recorded_at": event["recorded_at"],
+                        "predecessor_public_key_hex": active_public_key_hex,
+                        "successor_public_key_hex": successor,
+                        "reason_digest": event["body"]["reason_digest"],
+                    }
+                )
+                public_key_history.append(successor)
+                active_public_key_hex = successor
         state: dict[str, Any] = {
             "components": {},
             "evidence": {},
@@ -661,6 +925,13 @@ class EvidenceVault:
             "retirements": {},
             "event_count": len(events),
             "vault_root": previous or self._manifest["manifest_root"],
+            "journal_authority": {
+                "initial_public_key_hex": initial_public_key_hex,
+                "active_public_key_hex": active_public_key_hex,
+                "rotation_count": len(rotations),
+                "public_key_history": public_key_history,
+                "rotations": rotations,
+            },
         }
         for event in events:
             kind = event["event_type"]
@@ -717,7 +988,10 @@ class EvidenceVault:
             elif kind == "COMPONENT_RETIRED":
                 if body["component_ref"] not in state["components"]:
                     raise EvidenceVaultError("retirement journal references unknown component")
+                _validate_retirement(body, components=state["components"])
                 _insert_once(state["retirements"], body["component_ref"], row)
+            elif kind == "JOURNAL_AUTHORITY_ROTATED":
+                continue
             else:
                 raise EvidenceVaultError("vault event type is unknown")
         state["pending_deletions"] = {
@@ -779,6 +1053,27 @@ class EvidenceVault:
             path.is_file()
             and not path.is_symlink()
             and raw_sha256(path.read_bytes()) == reference["sha256"]
+        )
+
+    def _require_capture_eligible_component(
+        self,
+        state: Mapping[str, Any],
+        *,
+        component_ref: str,
+        claim_id: str,
+        field_name: str,
+    ) -> None:
+        retirement = state["retirements"].get(component_ref)
+        if retirement is None:
+            return
+        body = retirement["body"]
+        replacement = body.get("replacement_ref")
+        unsupported = claim_id in body.get("future_unsupported_claim_ids", [])
+        detail = "future claim is explicitly unsupported" if unsupported else (
+            f"use replacement {replacement}" if replacement is not None else "no replacement"
+        )
+        raise EvidenceVaultError(
+            f"{field_name} references retired component ({detail})"
         )
 
     def _object_retention_references_from_state(
@@ -856,6 +1151,11 @@ class EvidenceVault:
             raise EvidenceVaultError("read-only vault cannot append events")
         _instant(recorded_at)
         state = self.replay()
+        active_public_key_hex = state["journal_authority"]["active_public_key_hex"]
+        if self.signer.public_key_hex != active_public_key_hex:
+            raise EvidenceVaultError(
+                "vault signer does not match active journal authority"
+            )
         sequence = state["event_count"] + 1
         payload = {
             "schema": EVENT_SCHEMA,
@@ -874,7 +1174,7 @@ class EvidenceVault:
             "event_root": event_root,
             "signature": {
                 "algorithm": "ed25519",
-                "public_key_hex": self._manifest["public_key_hex"],
+                "public_key_hex": active_public_key_hex,
                 "signature_hex": self.signer.sign(event_root),
             },
         }
@@ -981,6 +1281,25 @@ class EvidenceVault:
             raise EvidenceVaultError("vault public key is invalid") from exc
         return manifest
 
+    def _verify_manifest_pins(self) -> None:
+        expected = self._trust_pins
+        for actual, pinned, label in (
+            (self.vault_id, expected.expected_vault_id, "vault id"),
+            (self.manifest_root, expected.expected_manifest_root, "manifest root"),
+            (
+                self.initial_public_key_hex,
+                expected.expected_public_key_hex,
+                "initial public key",
+            ),
+        ):
+            if pinned is not None and actual != pinned:
+                raise EvidenceVaultError(f"external {label} pin mismatch")
+
+    def _verify_vault_root_pin(self, state: Mapping[str, Any]) -> None:
+        expected = self._trust_pins.expected_vault_root
+        if expected is not None and state["vault_root"] != expected:
+            raise EvidenceVaultError("external vault root pin mismatch")
+
     def _object_path(self, sha256: str) -> Path:
         _sha256(sha256, "object sha256")
         path = self.root / "objects" / "sha256" / sha256[:2] / sha256[2:]
@@ -1042,6 +1361,82 @@ def _signature_message(event_root: str) -> bytes:
     return b"AuditSpec-evidence-vault-event-signature-v1\x00" + bytes.fromhex(
         event_root
     )
+
+
+def _validate_journal_authority_rotation(
+    body: Any,
+    *,
+    predecessor_public_key_hex: str,
+    public_key_history: Sequence[str],
+) -> str:
+    required = {
+        "schema",
+        "predecessor_public_key_hex",
+        "successor_public_key_hex",
+        "reason_digest",
+    }
+    if not isinstance(body, dict) or set(body) != required:
+        raise EvidenceVaultError("journal authority rotation body mismatch")
+    if (
+        body["schema"] != JOURNAL_AUTHORITY_ROTATION_SCHEMA
+        or body["predecessor_public_key_hex"] != predecessor_public_key_hex
+    ):
+        raise EvidenceVaultError("journal authority rotation predecessor mismatch")
+    successor = _public_key(
+        body["successor_public_key_hex"], "successor_public_key_hex"
+    )
+    _sha256(body["reason_digest"], "journal authority rotation reason_digest")
+    if successor in public_key_history:
+        raise EvidenceVaultError("journal authority rotation reuses a prior key")
+    return successor
+
+
+def _validate_retirement(
+    body: Any, *, components: Mapping[str, Any]
+) -> None:
+    if not isinstance(body, Mapping):
+        raise EvidenceVaultError("retirement certificate body mismatch")
+    schema = body.get("schema")
+    common = {
+        "schema",
+        "component_ref",
+        "replacement_ref",
+        "impacted_claim_ids",
+        "future_unsupported_claim_ids",
+        "archive_object_ref",
+        "existing_contracts_reverify_before_retirement",
+    }
+    if schema == "AuditSpec-evidence-vault-retirement-certificate-v1":
+        required = common
+    elif schema == RETIREMENT_SCHEMA_V2:
+        required = common | {"future_capture_policy", "retired_at"}
+        if body.get("future_capture_policy") != "reject_retired_reference":
+            raise EvidenceVaultError("retirement future-capture policy mismatch")
+        _instant(body.get("retired_at"))
+    else:
+        raise EvidenceVaultError("retirement certificate schema mismatch")
+    if set(body) != required:
+        raise EvidenceVaultError("retirement certificate body mismatch")
+    component_ref = body["component_ref"]
+    replacement_ref = body["replacement_ref"]
+    if replacement_ref is not None:
+        replacement = components.get(replacement_ref)
+        component = components.get(component_ref)
+        if (
+            replacement is None
+            or component is None
+            or replacement_ref == component_ref
+            or replacement["body"]["kind"] != component["body"]["kind"]
+        ):
+            raise EvidenceVaultError("retirement replacement is invalid")
+    if body["existing_contracts_reverify_before_retirement"] is not True:
+        raise EvidenceVaultError("retirement historical-verification policy mismatch")
+    for field in ("impacted_claim_ids", "future_unsupported_claim_ids"):
+        values = body[field]
+        if not isinstance(values, list) or values != sorted(set(values)):
+            raise EvidenceVaultError("retirement claim ids are not canonical")
+        for value in values:
+            _identifier(value, field)
 
 
 def _historic_key_valid(metadata: Mapping[str, Any], *, captured_at: str) -> bool:
@@ -1139,6 +1534,16 @@ def _sha256(value: Any, label: str) -> str:
     return value
 
 
+def _public_key(value: Any, label: str) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise EvidenceVaultError(f"{label} is not a raw Ed25519 public key")
+    try:
+        Ed25519PublicKey.from_public_bytes(bytes.fromhex(value))
+    except ValueError as exc:
+        raise EvidenceVaultError(f"{label} is not a raw Ed25519 public key") from exc
+    return value
+
+
 def _media_type(value: Any) -> str:
     if (
         not isinstance(value, str)
@@ -1207,6 +1612,14 @@ def _deletion_commit_body(intent: Mapping[str, Any]) -> dict[str, Any]:
     elif schema == DELETION_INTENT_SCHEMA_V2:
         required = common | {"retained_by_component_refs"}
         tombstone_schema = DELETION_TOMBSTONE_SCHEMA_V2
+    elif schema == DELETION_INTENT_SCHEMA_V3:
+        required = common | {
+            "authority_semantics",
+            "retained_by_component_refs",
+        }
+        tombstone_schema = DELETION_TOMBSTONE_SCHEMA_V3
+        if body["authority_semantics"] != AUTHORITY_ATTRIBUTION_SEMANTICS:
+            raise EvidenceVaultError("deletion authority semantics mismatch")
     else:
         raise EvidenceVaultError("deletion intent body mismatch")
     if set(body) != required:
@@ -1222,8 +1635,10 @@ def _deletion_commit_body(intent: Mapping[str, Any]) -> dict[str, Any]:
         "retained_by_live_evidence_ids": body["retained_by_live_evidence_ids"],
         "intent_event_root": intent["event_root"],
     }
-    if schema == DELETION_INTENT_SCHEMA_V2:
+    if schema in {DELETION_INTENT_SCHEMA_V2, DELETION_INTENT_SCHEMA_V3}:
         result["retained_by_component_refs"] = body["retained_by_component_refs"]
+    if schema == DELETION_INTENT_SCHEMA_V3:
+        result["authority_semantics"] = body["authority_semantics"]
     return result
 
 

@@ -24,6 +24,15 @@ auditctl --help
 auditvault --help
 ```
 
+Run the complete compiler-to-audit-time example:
+
+```bash
+python examples/end_to_end.py
+```
+
+See [the five-minute quickstart](docs/QUICKSTART.md) for the resulting trust
+status and direct CLI examples.
+
 ## What the compiler provides
 
 - typed claim and mechanism specifications;
@@ -32,6 +41,7 @@ auditvault --help
 - typed model, evidence, mediation, inventory, trust, and lifecycle gaps;
 - an append-only Evidence Vault with signed events and content-addressed data;
 - audit-time retrieval and re-verification;
+- caller-owned Vault identity/root pins and journal-authority key rotation;
 - Python and Rust consumers with shared canonical encodings.
 
 ## Verify the source tree
@@ -61,6 +71,20 @@ AuditSpec is exact only inside the declared finite world, mechanism catalog,
 dependency graph, trust roots, threat model, and cost objective. It does not
 prove that an inventory exhausts reality, translate law into the correct formal
 claim, establish production custody, or provide an open-world guarantee.
+
+An unpinned Vault reports `SELF_CONSISTENT`. An initial-key-only check reports
+`AUTHORITY_PINNED`; it does not authenticate manifest identity or freshness.
+`EXTERNALLY_AUTHENTICATED` requires a caller-owned manifest or Vault-root pin,
+and only a Vault-root pin provides rollback protection. `authority_ref` is
+explicitly attribution metadata asserted by the Vault authority, not an
+independently verified institution credential.
+
+Detailed operational boundaries:
+
+- [Threat model](docs/THREAT_MODEL.md)
+- [Vault trust and lifecycle model](docs/VAULT_TRUST_MODEL.md)
+- [Compatibility and Python/Rust parity](docs/COMPATIBILITY.md)
+- [Security policy](SECURITY.md)
 
 ## License
 

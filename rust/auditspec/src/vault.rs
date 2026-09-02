@@ -26,8 +26,16 @@ pub const RETRIEVAL_SCHEMA: &str = "AuditSpec-evidence-vault-audit-retrieval-v1"
 pub const REVERIFY_SCHEMA: &str = "AuditSpec-evidence-vault-reverification-v1";
 const DELETION_INTENT_SCHEMA_V1: &str = "AuditSpec-evidence-vault-deletion-intent-v1";
 const DELETION_INTENT_SCHEMA_V2: &str = "AuditSpec-evidence-vault-deletion-intent-v2";
+const DELETION_INTENT_SCHEMA_V3: &str = "AuditSpec-evidence-vault-deletion-intent-v3";
 const DELETION_TOMBSTONE_SCHEMA_V1: &str = "AuditSpec-evidence-vault-deletion-tombstone-v1";
 const DELETION_TOMBSTONE_SCHEMA_V2: &str = "AuditSpec-evidence-vault-deletion-tombstone-v2";
+const DELETION_TOMBSTONE_SCHEMA_V3: &str = "AuditSpec-evidence-vault-deletion-tombstone-v3";
+const JOURNAL_AUTHORITY_ROTATION_SCHEMA: &str =
+    "AuditSpec-evidence-vault-journal-authority-rotation-v1";
+const LEGAL_HOLD_SCHEMA_V2: &str = "AuditSpec-evidence-vault-legal-hold-v2";
+const LEGAL_HOLD_RELEASE_SCHEMA_V2: &str = "AuditSpec-evidence-vault-legal-hold-release-v2";
+const RETIREMENT_SCHEMA_V2: &str = "AuditSpec-evidence-vault-retirement-certificate-v2";
+const AUTHORITY_ATTRIBUTION_SEMANTICS: &str = "attribution_metadata_asserted_by_vault_authority";
 
 const COMPONENT_KINDS: &[&str] = &["bridge", "key", "policy", "schema", "verifier"];
 
@@ -96,6 +104,79 @@ pub fn load_private_key(path: &Path) -> Result<VaultSigner> {
     VaultSigner::from_bytes(&fs::read(path)?)
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct VaultTrustPins {
+    pub expected_vault_id: Option<String>,
+    pub expected_manifest_root: Option<String>,
+    pub expected_public_key_hex: Option<String>,
+    pub expected_vault_root: Option<String>,
+}
+
+impl VaultTrustPins {
+    fn validate(&self) -> Result<()> {
+        if let Some(value) = &self.expected_vault_id {
+            identifier(value, "expected_vault_id")?;
+        }
+        for (value, label) in [
+            (&self.expected_manifest_root, "expected_manifest_root"),
+            (&self.expected_vault_root, "expected_vault_root"),
+        ] {
+            if let Some(value) = value {
+                sha256_digest(value, label)?;
+            }
+        }
+        if let Some(value) = &self.expected_public_key_hex {
+            verifying_key(value)?;
+        }
+        if self.expected_vault_id.is_some() && !self.has_cryptographic_pin() {
+            return Err(invalid(
+                "expected_vault_id requires a manifest, public-key, or vault-root pin",
+            ));
+        }
+        Ok(())
+    }
+
+    fn has_cryptographic_pin(&self) -> bool {
+        self.expected_manifest_root.is_some()
+            || self.expected_public_key_hex.is_some()
+            || self.expected_vault_root.is_some()
+    }
+
+    fn names(&self) -> Vec<&'static str> {
+        [
+            ("vault_id", self.expected_vault_id.is_some()),
+            ("manifest_root", self.expected_manifest_root.is_some()),
+            ("public_key", self.expected_public_key_hex.is_some()),
+            ("vault_root", self.expected_vault_root.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(name, present)| present.then_some(name))
+        .collect()
+    }
+
+    fn authentication_status(&self) -> &'static str {
+        if self.expected_vault_root.is_some() || self.expected_manifest_root.is_some() {
+            "EXTERNALLY_AUTHENTICATED"
+        } else if self.expected_public_key_hex.is_some() {
+            "AUTHORITY_PINNED"
+        } else {
+            "SELF_CONSISTENT"
+        }
+    }
+
+    fn authentication_scope(&self) -> &'static str {
+        if self.expected_vault_root.is_some() {
+            "SNAPSHOT"
+        } else if self.expected_manifest_root.is_some() {
+            "GENESIS"
+        } else if self.expected_public_key_hex.is_some() {
+            "SIGNING_AUTHORITY"
+        } else {
+            "INTERNAL_ONLY"
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct EventRecord {
     body: Value,
@@ -120,6 +201,10 @@ pub struct VaultState {
     retirements: BTreeMap<String, EventRecord>,
     pub event_count: usize,
     pub vault_root: String,
+    pub initial_public_key_hex: String,
+    pub active_public_key_hex: String,
+    pub public_key_history: Vec<String>,
+    pub journal_authority_rotations: Vec<Value>,
 }
 
 impl VaultState {
@@ -157,6 +242,7 @@ pub struct EvidenceVault {
     root: PathBuf,
     signer: Option<VaultSigner>,
     manifest: Value,
+    trust_pins: VaultTrustPins,
 }
 
 impl EvidenceVault {
@@ -197,22 +283,43 @@ impl EvidenceVault {
     }
 
     pub fn open_read_only(root: &Path) -> Result<Self> {
-        Self::open_with_signer(root, None)
+        Self::open_read_only_with_pins(root, VaultTrustPins::default())
+    }
+
+    pub fn open_read_only_with_pins(root: &Path, trust_pins: VaultTrustPins) -> Result<Self> {
+        Self::open_internal(root, None, trust_pins)
     }
 
     pub fn open_with_signer(root: &Path, signer: Option<VaultSigner>) -> Result<Self> {
+        Self::open_internal(root, signer, VaultTrustPins::default())
+    }
+
+    fn open_internal(
+        root: &Path,
+        signer: Option<VaultSigner>,
+        trust_pins: VaultTrustPins,
+    ) -> Result<Self> {
+        trust_pins.validate()?;
         let root = absolute(root)?;
         let manifest = load_manifest(&root)?;
-        if let Some(active) = &signer
-            && active.public_key_hex() != field_str(&manifest, "public_key_hex")?
-        {
-            return Err(invalid("vault signer does not match manifest public key"));
-        }
         let vault = Self {
             root,
             signer,
             manifest,
+            trust_pins,
         };
+        vault.verify_manifest_pins()?;
+        if vault.signer.is_some() || vault.trust_pins.has_cryptographic_pin() {
+            let state = vault.replay()?;
+            vault.verify_vault_root_pin(&state)?;
+            if let Some(active) = &vault.signer {
+                if active.public_key_hex() != state.active_public_key_hex {
+                    return Err(invalid(
+                        "vault signer does not match active journal authority",
+                    ));
+                }
+            }
+        }
         if vault.signer.is_some() {
             vault.with_lock(|active| active.recover_locked())?;
         }
@@ -225,6 +332,72 @@ impl EvidenceVault {
 
     pub fn vault_id(&self) -> Result<&str> {
         field_str(&self.manifest, "vault_id")
+    }
+
+    pub fn manifest_root(&self) -> Result<&str> {
+        field_str(&self.manifest, "manifest_root")
+    }
+
+    pub fn initial_public_key_hex(&self) -> Result<&str> {
+        field_str(&self.manifest, "public_key_hex")
+    }
+
+    pub fn assurance(&self, state: Option<&VaultState>) -> Result<Value> {
+        let owned;
+        let current = match state {
+            Some(value) => value,
+            None => {
+                owned = self.replay()?;
+                &owned
+            }
+        };
+        self.verify_vault_root_pin(current)?;
+        Ok(json!({
+            "schema": "AuditSpec-evidence-vault-assurance-v1",
+            "status": self.trust_pins.authentication_status(),
+            "authentication_scope": self.trust_pins.authentication_scope(),
+            "rollback_protection": self.trust_pins.expected_vault_root.is_some(),
+            "integrity_status": "VALID",
+            "external_pin_names": self.trust_pins.names(),
+            "vault_id": self.vault_id()?,
+            "manifest_root": self.manifest_root()?,
+            "vault_root": current.vault_root,
+            "initial_public_key_hex": current.initial_public_key_hex,
+            "active_public_key_hex": current.active_public_key_hex,
+            "journal_authority_rotation_count": current.journal_authority_rotations.len(),
+            "time_assurance": "DECLARED_BY_VAULT_AUTHORITY"
+        }))
+    }
+
+    pub fn rotate_journal_authority(
+        &self,
+        successor_public_key_hex: &str,
+        reason_digest: &str,
+        recorded_at: &str,
+    ) -> Result<Value> {
+        verifying_key(successor_public_key_hex)?;
+        sha256_digest(reason_digest, "reason_digest")?;
+        instant(recorded_at)?;
+        self.with_transaction(|vault| {
+            let state = vault.replay()?;
+            if state
+                .public_key_history
+                .iter()
+                .any(|value| value == successor_public_key_hex)
+            {
+                return Err(invalid("journal authority key was already used"));
+            }
+            vault.append_event_locked(
+                "JOURNAL_AUTHORITY_ROTATED",
+                json!({
+                    "schema": JOURNAL_AUTHORITY_ROTATION_SCHEMA,
+                    "predecessor_public_key_hex": state.active_public_key_hex,
+                    "successor_public_key_hex": successor_public_key_hex,
+                    "reason_digest": reason_digest
+                }),
+                recorded_at,
+            )
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -316,8 +489,17 @@ impl EvidenceVault {
                 if component.and_then(|row| field_str(&row.body, "kind").ok()) != Some(expected) {
                     return Err(invalid(format!("{name} is unresolved or has wrong kind")));
                 }
+                vault.require_capture_eligible_component(&state, reference, claim_id, name)?;
             }
             validate_world_scope(&world_scope, &state.components)?;
+            if field_str(&world_scope, "type")? == "externally_bridged_world" {
+                vault.require_capture_eligible_component(
+                    &state,
+                    field_str(&world_scope, "bridge_ref")?,
+                    claim_id,
+                    "bridge_ref",
+                )?;
+            }
             let object_ref = vault.put_object(content, media_type_value)?;
             let body = json!({
                 "schema": EVIDENCE_SCHEMA,
@@ -422,10 +604,11 @@ impl EvidenceVault {
             vault.append_event_locked(
                 "LEGAL_HOLD_PLACED",
                 json!({
-                    "schema": "AuditSpec-evidence-vault-legal-hold-v1",
+                    "schema": LEGAL_HOLD_SCHEMA_V2,
                     "hold_id": hold_id,
                     "evidence_ids": ids,
                     "authority_ref": authority_ref,
+                    "authority_semantics": AUTHORITY_ATTRIBUTION_SEMANTICS,
                     "reason_digest": reason_digest
                 }),
                 recorded_at,
@@ -453,9 +636,10 @@ impl EvidenceVault {
             vault.append_event_locked(
                 "LEGAL_HOLD_RELEASED",
                 json!({
-                    "schema": "AuditSpec-evidence-vault-legal-hold-release-v1",
+                    "schema": LEGAL_HOLD_RELEASE_SCHEMA_V2,
                     "hold_id": hold_id,
                     "authority_ref": authority_ref,
+                    "authority_semantics": AUTHORITY_ATTRIBUTION_SEMANTICS,
                     "release_reason_digest": release_reason_digest,
                     "placed_event_root": hold.placed_event_root
                 }),
@@ -560,12 +744,13 @@ impl EvidenceVault {
             let intent = vault.append_event_locked(
                 "EVIDENCE_DELETION_INTENT",
                 json!({
-                    "schema": DELETION_INTENT_SCHEMA_V2,
+                    "schema": DELETION_INTENT_SCHEMA_V3,
                     "evidence_id": evidence_id,
                     "deleted_at": deleted_at,
                     "object_sha256": object_sha,
                     "deletion_basis": deletion_basis,
                     "authority_ref": authority_ref,
+                    "authority_semantics": AUTHORITY_ATTRIBUTION_SEMANTICS,
                     "retention_decision": decision,
                     "physical_delete_required": physical_delete_required,
                     "retained_by_live_evidence_ids": other_live,
@@ -609,6 +794,19 @@ impl EvidenceVault {
             if replacement_ref.is_some_and(|reference| !state.components.contains_key(reference)) {
                 return Err(invalid("replacement component is unknown"));
             }
+            if replacement_ref == Some(component_ref) {
+                return Err(invalid("replacement component must differ"));
+            }
+            if let Some(reference) = replacement_ref {
+                if state.retirements.contains_key(reference) {
+                    return Err(invalid("replacement component is retired"));
+                }
+                if field_str(&state.components[reference].body, "kind")?
+                    != field_str(&state.components[component_ref].body, "kind")?
+                {
+                    return Err(invalid("replacement component has wrong kind"));
+                }
+            }
             let mut impacted = impacted_claim_ids.to_vec();
             impacted.sort();
             impacted.dedup();
@@ -620,13 +818,15 @@ impl EvidenceVault {
             vault.append_event_locked(
                 "COMPONENT_RETIRED",
                 json!({
-                    "schema": "AuditSpec-evidence-vault-retirement-certificate-v1",
+                    "schema": RETIREMENT_SCHEMA_V2,
                     "component_ref": component_ref,
                     "replacement_ref": replacement_ref,
                     "impacted_claim_ids": impacted,
                     "future_unsupported_claim_ids": unsupported,
                     "archive_object_ref": archive_object_ref,
-                    "existing_contracts_reverify_before_retirement": true
+                    "existing_contracts_reverify_before_retirement": true,
+                    "future_capture_policy": "reject_retired_reference",
+                    "retired_at": recorded_at
                 }),
                 recorded_at,
             )
@@ -700,6 +900,7 @@ impl EvidenceVault {
             material.insert(evidence_id.to_owned(), data);
         }
         gaps = deduplicate_gaps(gaps)?;
+        let assurance = self.assurance(Some(&state))?;
         let mut record = json!({
             "schema": RETRIEVAL_SCHEMA,
             "vault_id": self.vault_id()?,
@@ -713,7 +914,11 @@ impl EvidenceVault {
             "retrieved_evidence_count": material.len(),
             "journal_event_count": state.event_count,
             "vault_root": state.vault_root,
-            "remaining_unproven": ["open_world_inventory_completeness"]
+            "vault_authentication_status": field(&assurance, "status")?.clone(),
+            "vault_authentication_scope": field(&assurance, "authentication_scope")?.clone(),
+            "vault_rollback_protection": field(&assurance, "rollback_protection")?.clone(),
+            "external_pin_names": field(&assurance, "external_pin_names")?.clone(),
+            "remaining_unproven": ["capture_truth", "open_world_inventory_completeness"]
         });
         let proof = digest(RETRIEVAL_SCHEMA, &record)?;
         object_mut(&mut record)?.insert("proof_digest".to_owned(), Value::String(proof));
@@ -736,7 +941,11 @@ impl EvidenceVault {
             "bundle_id": bundle_id,
             "claim_id": claim_id,
             "audited_at": audited_at,
-            "retrieval_proof_digest": field(&retrieval.record, "proof_digest")?.clone()
+            "retrieval_proof_digest": field(&retrieval.record, "proof_digest")?.clone(),
+            "vault_authentication_status": field(&retrieval.record, "vault_authentication_status")?.clone(),
+            "vault_authentication_scope": field(&retrieval.record, "vault_authentication_scope")?.clone(),
+            "vault_rollback_protection": field(&retrieval.record, "vault_rollback_protection")?.clone(),
+            "external_pin_names": field(&retrieval.record, "external_pin_names")?.clone()
         });
         if field_str(&retrieval.record, "status")? != "READY_FOR_REVERIFICATION" {
             let mut body = object(&base)?.clone();
@@ -758,7 +967,21 @@ impl EvidenceVault {
             }
         }
         if records.is_empty() {
-            return Err(invalid("bundle has no evidence for claim"));
+            let mut body = object(&base)?.clone();
+            body.extend(
+                object(&json!({
+                    "status": "INVENTORY_GAP",
+                    "verdict": "INVENTORY_GAP",
+                    "claim_value": null,
+                    "primary_failure": {
+                        "subtype": "CLAIM_EVIDENCE_ABSENT",
+                        "claim_id": claim_id
+                    },
+                    "additional_detected_failures": []
+                }))?
+                .clone(),
+            );
+            return with_proof(REVERIFY_SCHEMA, Value::Object(body));
         }
         let verifier_refs = records
             .iter()
@@ -808,7 +1031,10 @@ impl EvidenceVault {
     }
 
     pub fn replay(&self) -> Result<VaultState> {
-        let public = verifying_key(field_str(&self.manifest, "public_key_hex")?)?;
+        let initial_public_key_hex = self.initial_public_key_hex()?.to_owned();
+        let mut active_public_key_hex = initial_public_key_hex.clone();
+        let mut public_key_history = vec![initial_public_key_hex.clone()];
+        let mut journal_authority_rotations = Vec::new();
         let mut paths = fs::read_dir(self.root.join("events"))?
             .map(|entry| entry.map(|entry| entry.path()))
             .collect::<std::io::Result<Vec<_>>>()?;
@@ -829,19 +1055,37 @@ impl EvidenceVault {
                 return Err(invalid("vault event filename sequence is invalid"));
             }
             let event = strict_json_loads(&fs::read_to_string(path)?)?;
+            let public = verifying_key(&active_public_key_hex)?;
             verify_event(
                 &event,
                 &public,
                 sequence,
                 previous.as_deref(),
                 self.vault_id()?,
-                field_str(&self.manifest, "public_key_hex")?,
+                &active_public_key_hex,
             )?;
             let event_root = field_str(&event, "event_root")?.to_owned();
             if filename != format!("{sequence:020}-{event_root}.json") {
                 return Err(invalid("vault event filename/root mismatch"));
             }
             previous = Some(event_root);
+            if field_str(&event, "event_type")? == "JOURNAL_AUTHORITY_ROTATED" {
+                let successor = validate_journal_authority_rotation(
+                    field(&event, "body")?,
+                    &active_public_key_hex,
+                    &public_key_history,
+                )?;
+                journal_authority_rotations.push(json!({
+                    "sequence": sequence,
+                    "event_root": field(&event, "event_root")?.clone(),
+                    "recorded_at": field(&event, "recorded_at")?.clone(),
+                    "predecessor_public_key_hex": active_public_key_hex,
+                    "successor_public_key_hex": successor,
+                    "reason_digest": field(field(&event, "body")?, "reason_digest")?.clone()
+                }));
+                public_key_history.push(successor.clone());
+                active_public_key_hex = successor;
+            }
             events.push(event);
         }
         let mut state = VaultState {
@@ -858,6 +1102,10 @@ impl EvidenceVault {
                     .unwrap()
                     .to_owned()
             }),
+            initial_public_key_hex,
+            active_public_key_hex,
+            public_key_history,
+            journal_authority_rotations,
         };
         for event in events {
             let event_type = field_str(&event, "event_type")?;
@@ -946,8 +1194,10 @@ impl EvidenceVault {
                     if !state.components.contains_key(&component_ref) {
                         return Err(invalid("retirement journal references unknown component"));
                     }
+                    validate_retirement(&body, &state.components)?;
                     insert_once(&mut state.retirements, component_ref, row)?;
                 }
+                "JOURNAL_AUTHORITY_ROTATED" => {}
                 _ => return Err(invalid("vault event type is unknown")),
             }
         }
@@ -1029,6 +1279,32 @@ impl EvidenceVault {
         Ok(metadata.is_file()
             && !metadata.file_type().is_symlink()
             && raw_sha256(&fs::read(path)?) == sha)
+    }
+
+    fn require_capture_eligible_component(
+        &self,
+        state: &VaultState,
+        component_ref: &str,
+        claim_id: &str,
+        field_name: &str,
+    ) -> Result<()> {
+        let Some(retirement) = state.retirements.get(component_ref) else {
+            return Ok(());
+        };
+        let body = &retirement.body;
+        let unsupported = string_array(field(body, "future_unsupported_claim_ids")?)?
+            .iter()
+            .any(|value| value == claim_id);
+        let detail = if unsupported {
+            "future claim is explicitly unsupported".to_owned()
+        } else if let Some(replacement) = optional_str(field(body, "replacement_ref")?)? {
+            format!("use replacement {replacement}")
+        } else {
+            "no replacement".to_owned()
+        };
+        Err(invalid(format!(
+            "{field_name} references retired component ({detail})"
+        )))
     }
 
     fn object_retention_references_from_state(
@@ -1242,6 +1518,11 @@ impl EvidenceVault {
         instant(recorded_at)?;
         canonical_bytes(&body)?;
         let state = self.replay()?;
+        if signer.public_key_hex() != state.active_public_key_hex {
+            return Err(invalid(
+                "vault signer does not match active journal authority",
+            ));
+        }
         let sequence = state.event_count + 1;
         let payload = json!({
             "schema": EVENT_SCHEMA,
@@ -1259,7 +1540,7 @@ impl EvidenceVault {
             "signature".to_owned(),
             json!({
                 "algorithm": "ed25519",
-                "public_key_hex": field_str(&self.manifest, "public_key_hex")?,
+                "public_key_hex": state.active_public_key_hex,
                 "signature_hex": signer.sign_root(&event_root)?
             }),
         );
@@ -1273,6 +1554,43 @@ impl EvidenceVault {
             0o644,
         )?;
         Ok(value)
+    }
+
+    fn verify_manifest_pins(&self) -> Result<()> {
+        for (actual, pinned, label) in [
+            (
+                self.vault_id()?,
+                self.trust_pins.expected_vault_id.as_deref(),
+                "vault id",
+            ),
+            (
+                self.manifest_root()?,
+                self.trust_pins.expected_manifest_root.as_deref(),
+                "manifest root",
+            ),
+            (
+                self.initial_public_key_hex()?,
+                self.trust_pins.expected_public_key_hex.as_deref(),
+                "initial public key",
+            ),
+        ] {
+            if pinned.is_some_and(|expected| actual != expected) {
+                return Err(invalid(format!("external {label} pin mismatch")));
+            }
+        }
+        Ok(())
+    }
+
+    fn verify_vault_root_pin(&self, state: &VaultState) -> Result<()> {
+        if self
+            .trust_pins
+            .expected_vault_root
+            .as_deref()
+            .is_some_and(|expected| state.vault_root != expected)
+        {
+            return Err(invalid("external vault root pin mismatch"));
+        }
+        Ok(())
     }
 
     fn object_path(&self, sha: &str) -> Result<PathBuf> {
@@ -1361,9 +1679,30 @@ fn deletion_commit_body(intent: &Value) -> Result<Value> {
             ],
             DELETION_TOMBSTONE_SCHEMA_V2,
         ),
+        DELETION_INTENT_SCHEMA_V3 => (
+            vec![
+                "authority_ref",
+                "authority_semantics",
+                "deleted_at",
+                "deletion_basis",
+                "evidence_id",
+                "object_sha256",
+                "physical_delete_required",
+                "retained_by_component_refs",
+                "retained_by_live_evidence_ids",
+                "retention_decision",
+                "schema",
+            ],
+            DELETION_TOMBSTONE_SCHEMA_V3,
+        ),
         _ => return Err(invalid("deletion intent schema mismatch")),
     };
     exact_keys(body, &keys, "deletion intent body")?;
+    if schema == DELETION_INTENT_SCHEMA_V3
+        && field_str(body, "authority_semantics")? != AUTHORITY_ATTRIBUTION_SEMANTICS
+    {
+        return Err(invalid("deletion authority semantics mismatch"));
+    }
     let mut tombstone = json!({
         "schema": tombstone_schema,
         "evidence_id": field(body, "evidence_id")?.clone(),
@@ -1375,10 +1714,16 @@ fn deletion_commit_body(intent: &Value) -> Result<Value> {
         "retained_by_live_evidence_ids": field(body, "retained_by_live_evidence_ids")?.clone(),
         "intent_event_root": field(intent, "event_root")?.clone()
     });
-    if schema == DELETION_INTENT_SCHEMA_V2 {
+    if [DELETION_INTENT_SCHEMA_V2, DELETION_INTENT_SCHEMA_V3].contains(&schema) {
         object_mut(&mut tombstone)?.insert(
             "retained_by_component_refs".to_owned(),
             field(body, "retained_by_component_refs")?.clone(),
+        );
+    }
+    if schema == DELETION_INTENT_SCHEMA_V3 {
+        object_mut(&mut tombstone)?.insert(
+            "authority_semantics".to_owned(),
+            field(body, "authority_semantics")?.clone(),
         );
     }
     Ok(tombstone)
@@ -1444,6 +1789,93 @@ fn verify_event(
         .map_err(|_| invalid("vault event signature invalid"))
 }
 
+fn validate_journal_authority_rotation(
+    body: &Value,
+    predecessor_public_key_hex: &str,
+    public_key_history: &[String],
+) -> Result<String> {
+    exact_keys(
+        body,
+        &[
+            "predecessor_public_key_hex",
+            "reason_digest",
+            "schema",
+            "successor_public_key_hex",
+        ],
+        "journal authority rotation body",
+    )?;
+    if field_str(body, "schema")? != JOURNAL_AUTHORITY_ROTATION_SCHEMA
+        || field_str(body, "predecessor_public_key_hex")? != predecessor_public_key_hex
+    {
+        return Err(invalid("journal authority rotation predecessor mismatch"));
+    }
+    let successor = field_str(body, "successor_public_key_hex")?.to_owned();
+    verifying_key(&successor)?;
+    sha256_digest(
+        field_str(body, "reason_digest")?,
+        "journal authority rotation reason_digest",
+    )?;
+    if public_key_history.iter().any(|value| value == &successor) {
+        return Err(invalid("journal authority rotation reuses a prior key"));
+    }
+    Ok(successor)
+}
+
+fn validate_retirement(body: &Value, components: &BTreeMap<String, EventRecord>) -> Result<()> {
+    let schema = field_str(body, "schema")?;
+    let mut keys = vec![
+        "archive_object_ref",
+        "component_ref",
+        "existing_contracts_reverify_before_retirement",
+        "future_unsupported_claim_ids",
+        "impacted_claim_ids",
+        "replacement_ref",
+        "schema",
+    ];
+    match schema {
+        "AuditSpec-evidence-vault-retirement-certificate-v1" => {}
+        RETIREMENT_SCHEMA_V2 => {
+            keys.extend(["future_capture_policy", "retired_at"]);
+            if field_str(body, "future_capture_policy")? != "reject_retired_reference" {
+                return Err(invalid("retirement future-capture policy mismatch"));
+            }
+            instant(field_str(body, "retired_at")?)?;
+        }
+        _ => return Err(invalid("retirement certificate schema mismatch")),
+    }
+    exact_keys(body, &keys, "retirement certificate body")?;
+    let component_ref = field_str(body, "component_ref")?;
+    if let Some(replacement_ref) = optional_str(field(body, "replacement_ref")?)? {
+        let component = components
+            .get(component_ref)
+            .ok_or_else(|| invalid("retirement replacement is invalid"))?;
+        let replacement = components
+            .get(replacement_ref)
+            .ok_or_else(|| invalid("retirement replacement is invalid"))?;
+        if replacement_ref == component_ref
+            || field_str(&component.body, "kind")? != field_str(&replacement.body, "kind")?
+        {
+            return Err(invalid("retirement replacement is invalid"));
+        }
+    }
+    if field(body, "existing_contracts_reverify_before_retirement")?.as_bool() != Some(true) {
+        return Err(invalid(
+            "retirement historical-verification policy mismatch",
+        ));
+    }
+    for field_name in ["impacted_claim_ids", "future_unsupported_claim_ids"] {
+        let values = string_array(field(body, field_name)?)?;
+        let canonical = values.iter().cloned().collect::<BTreeSet<_>>();
+        if values != canonical.into_iter().collect::<Vec<_>>() {
+            return Err(invalid("retirement claim ids are not canonical"));
+        }
+        for value in values {
+            identifier(&value, field_name)?;
+        }
+    }
+    Ok(())
+}
+
 fn signature_message(event_root: &str) -> Result<Vec<u8>> {
     sha256_digest(event_root, "event_root")?;
     let mut message = b"AuditSpec-evidence-vault-event-signature-v1\0".to_vec();
@@ -1471,10 +1903,10 @@ fn historic_key_valid(metadata: &Value, captured_at: &str) -> Result<bool> {
     if captured < instant(field_str(metadata, "valid_from")?)? {
         return Ok(false);
     }
-    if let Some(valid_until) = optional_str(field(metadata, "valid_until")?)?
-        && captured > instant(valid_until)?
-    {
-        return Ok(false);
+    if let Some(valid_until) = optional_str(field(metadata, "valid_until")?)? {
+        if captured > instant(valid_until)? {
+            return Ok(false);
+        }
     }
     let revocation = optional_str(field(metadata, "revocation_kind")?)?;
     if ![None, Some("routine"), Some("retroactive_compromise")].contains(&revocation) {
@@ -1518,10 +1950,10 @@ fn bridge_valid(metadata: &Value, audited_at: &str) -> Result<bool> {
     if at < instant(field_str(metadata, "valid_from")?)? {
         return Ok(false);
     }
-    if let Some(valid_until) = optional_str(field(metadata, "valid_until")?)?
-        && at > instant(valid_until)?
-    {
-        return Ok(false);
+    if let Some(valid_until) = optional_str(field(metadata, "valid_until")?)? {
+        if at > instant(valid_until)? {
+            return Ok(false);
+        }
     }
     Ok(match optional_str(field(metadata, "revoked_at")?)? {
         None => true,
