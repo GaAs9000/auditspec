@@ -2,7 +2,10 @@
 
 This crate supplies a standalone binary for signed Evidence Vault custody,
 audit-time JSON-predicate re-verification, retention and legal-hold operations,
-two-stage deletion recovery, and fail-closed trust evaluation.
+two-stage deletion recovery, and fail-closed trust evaluation. It also verifies
+Python-generated claim-relative lifecycle and migration certificates: a
+preserved claim may continue through a globally lossy schema, while a lifecycle
+twin terminates as a hard semantic gap.
 
 ## Build and test
 
