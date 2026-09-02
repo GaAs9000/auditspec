@@ -1,0 +1,283 @@
+name: aml-mechanism-lab
+description: Bounded AML/KYC release workflow with vendor evidence, authority, policy, durable case state, coverage, and vendor-signal ablation.
+metadata:
+  domain: finance-aml
+  anchor_entity: case_action
+  identity_facts: [vendor_signal]
+  catalog_version: 2026-08-14-v1
+  baselines:
+    final_only: [final_release_status]
+    generic_trace: [final_release_status, generic_case_trace]
+    fixed_receipts: [canonical_case_action, vendor_receipt, durable_case_receipt]
+    delegation_dual_graph: [canonical_case_action, delegation_context, screening_coverage]
+    full_policy_environment: [canonical_case_action, vendor_receipt, delegation_context, policy_snapshot, analyst_record, screening_coverage]
+    retain_all_passive: [final_release_status, generic_case_trace, canonical_case_action, vendor_receipt, delegation_context, policy_snapshot, analyst_record, durable_case_receipt, screening_coverage, coarse_vendor_channel, vendor_state_token]
+
+variables:
+  vendor_signal: [clear, hit]
+  vendor_response_bound: [false, true]
+  model_decision: [hold, release]
+  analyst_decision: [hold, release]
+  policy_release_on_clear: [false, true]
+  policy_effective: [false, true]
+  delegation_scope_release: [false, true]
+  delegation_executor_bound: [false, true]
+  durable_case_state: [held, released]
+  release_event_bound: [false, true]
+  screening_channel_complete: [false, true]
+  release_without_vendor_signal: [false, true]
+
+constraints:
+  - "analyst_decision == 'release' or not release_without_vendor_signal"
+
+facts:
+  vendor_signal: {domain: vendor, entity: screening_result, sensitivity: 3}
+  vendor_response_bound: {domain: vendor, entity: screening_result, sensitivity: 2}
+  model_decision: {domain: human, entity: review, sensitivity: 2}
+  analyst_decision: {domain: human, entity: review, sensitivity: 2}
+  policy_release_on_clear: {domain: policy, entity: policy_version, sensitivity: 0}
+  policy_effective: {domain: policy, entity: policy_version, sensitivity: 0}
+  delegation_scope_release: {domain: authority, entity: delegation, sensitivity: 2}
+  delegation_executor_bound: {domain: authority, entity: delegation, sensitivity: 2}
+  durable_case_state: {domain: effect, entity: case_state, sensitivity: 3}
+  release_event_bound: {domain: effect, entity: case_state, sensitivity: 1}
+  screening_channel_complete:
+    domain: vendor
+    entity: screening_result
+    sensitivity: 0
+    negative_evidence_channel: screening_api
+  release_without_vendor_signal: {domain: replay, entity: replay_run, sensitivity: 3}
+
+queries:
+  release_authorized:
+    split: development
+    kind: authorization
+    expression: "analyst_decision == 'release' and vendor_signal == 'clear' and vendor_response_bound and policy_release_on_clear and policy_effective and delegation_scope_release and delegation_executor_bound"
+  release_matches_durable_state:
+    split: development
+    kind: fact
+    expression: "(analyst_decision == 'release') == (durable_case_state == 'released') and release_event_bound"
+  analyst_override_occurred:
+    split: development
+    kind: attribution
+    expression: "model_decision != analyst_decision"
+  delegation_attributable:
+    split: development
+    kind: attribution
+    expression: "delegation_scope_release and delegation_executor_bound"
+  screening_policy_effective:
+    split: development
+    kind: compliance
+    expression: "policy_effective and policy_release_on_clear"
+  no_screening_bypass:
+    split: held_out
+    kind: coverage
+    expression: "screening_channel_complete"
+  vendor_result_bound:
+    split: held_out
+    kind: provenance
+    expression: "vendor_response_bound"
+  vendor_signal_necessary_for_release:
+    split: held_out
+    kind: causality
+    intervention_target: remove_vendor_signal
+    expression: "analyst_decision == 'release' and not release_without_vendor_signal"
+
+mechanisms:
+  final_release_status:
+    mode: passive
+    producer: agent
+    capture_point: agent
+    trust_class: agent_asserted
+    facts: [analyst_decision]
+    integrity: none
+    adapter: agent-final
+    cost: {bytes: 76, privacy: 1, latency_ms: 0, fragility: 3}
+  generic_case_trace:
+    mode: passive
+    producer: framework_runtime
+    capture_point: framework_runtime
+    trust_class: runtime_observed
+    facts: [model_decision, analyst_decision]
+    capabilities: [bind:execution:human]
+    binding_edges: [case_action->review]
+    integrity: hash_chain
+    adapter: generic-trace
+    cost: {bytes: 520, privacy: 4, latency_ms: 0.05, fragility: 2}
+  canonical_case_action:
+    mode: passive
+    producer: case_gateway
+    capture_point: case_gateway
+    trust_class: gateway_bound
+    facts: []
+    integrity: hmac-sha256
+    adapter: canonical-case-action
+    cost: {bytes: 210, privacy: 2, latency_ms: 0.04, fragility: 1}
+  vendor_receipt:
+    mode: passive
+    producer: vendor_gateway
+    capture_point: vendor_gateway
+    trust_class: gateway_bound
+    facts: [vendor_signal, vendor_response_bound]
+    capabilities: [bind:execution:vendor]
+    binding_edges: [case_action->screening_result]
+    requires: [canonical_case_action]
+    integrity: hmac-sha256
+    adapter: vendor-receipt
+    cost: {bytes: 282, privacy: 3, latency_ms: 0.09, fragility: 1}
+  delegation_context:
+    mode: passive
+    producer: identity_gateway
+    capture_point: identity_gateway
+    trust_class: gateway_bound
+    facts: [delegation_scope_release, delegation_executor_bound]
+    capabilities: [bind:execution:authority]
+    binding_edges: [case_action->delegation]
+    requires: [canonical_case_action]
+    integrity: hmac-sha256
+    adapter: delegation-cim
+    cost: {bytes: 260, privacy: 3, latency_ms: 0.07, fragility: 1}
+  policy_snapshot:
+    mode: passive
+    producer: policy_registry
+    capture_point: policy_registry
+    trust_class: signed_service
+    facts: [policy_release_on_clear, policy_effective]
+    capabilities: [bind:execution:policy]
+    binding_edges: [case_action->policy_version]
+    requires: [canonical_case_action]
+    integrity: hmac-sha256
+    adapter: policy-snapshot
+    cost: {bytes: 260, privacy: 1, latency_ms: 0.08, fragility: 1}
+  analyst_record:
+    mode: passive
+    producer: review_service
+    capture_point: review_service
+    trust_class: signed_service
+    facts: [model_decision, analyst_decision]
+    capabilities: [bind:execution:human]
+    binding_edges: [case_action->review]
+    requires: [canonical_case_action]
+    integrity: hmac-sha256
+    adapter: analyst-review
+    cost: {bytes: 250, privacy: 3, latency_ms: 0.07, fragility: 1}
+  durable_case_receipt:
+    mode: passive
+    producer: case_store
+    capture_point: case_store
+    trust_class: durable_service
+    facts: [durable_case_state, release_event_bound]
+    capabilities: [bind:execution:effect]
+    binding_edges: [case_action->case_state]
+    requires: [canonical_case_action]
+    integrity: hmac-sha256
+    adapter: durable-case-receipt
+    cost: {bytes: 300, privacy: 4, latency_ms: 0.11, fragility: 1}
+  screening_coverage:
+    mode: passive
+    producer: vendor_gateway
+    capture_point: vendor_gateway
+    trust_class: gateway_bound
+    facts: [screening_channel_complete]
+    capabilities: [bind:execution:vendor]
+    binding_edges: [case_action->screening_result]
+    requires: [canonical_case_action]
+    coverage_channel: screening_api
+    integrity: hmac-sha256
+    adapter: vendor-coverage
+    cost: {bytes: 134, privacy: 0, latency_ms: 0.02, fragility: 1}
+  coarse_vendor_channel:
+    mode: passive
+    producer: vendor_gateway
+    capture_point: vendor_gateway
+    trust_class: signed_service
+    binding_edges: [case_action->screening_result]
+    observations:
+      - name: vendor_signal_present
+        kind: presence
+        sources: [vendor_signal]
+        output_type: boolean
+        entity: screening_result
+      - name: vendor_binding_present
+        kind: presence
+        sources: [vendor_response_bound]
+        output_type: boolean
+        entity: screening_result
+    integrity: hmac-sha256
+    adapter: coarse-bucket
+    capture: case-bound presence-only vendor metadata
+    cost: {bytes: 44, privacy: 0, latency_ms: 0.01, fragility: 1}
+  vendor_state_token:
+    mode: passive
+    producer: vendor_gateway
+    capture_point: vendor_gateway
+    trust_class: signed_service
+    binding_edges: [case_action->screening_result]
+    observations:
+      - name: vendor_state_domain_token
+        kind: digest
+        sources: [vendor_signal, vendor_response_bound]
+        parameters: {namespace: aml-vendor-state-v1}
+        output_type: digest
+        entity: screening_result
+    integrity: hmac-sha256
+    adapter: digest-token
+    capture: case-bound token for the bounded vendor state
+    cost: {bytes: 104, privacy: 1, latency_ms: 0.03, fragility: 1}
+  virtualized_vendor_ablation:
+    mode: active
+    producer: audit_sandbox
+    capture_point: audit_sandbox
+    trust_class: isolated_replay
+    facts: [release_without_vendor_signal]
+    capabilities: [bind:execution:replay]
+    binding_edges: [case_action->replay_run]
+    requires: [canonical_case_action, vendor_receipt, analyst_record, durable_case_receipt]
+    integrity: hmac-sha256
+    adapter: vendor-ablation
+    cost: {bytes: 860, privacy: 4, latency_ms: 4.1, fragility: 3}
+    replay:
+      target: remove_vendor_signal
+      prefix_checkpoint: before_screening_decision
+      snapshot: case_state_snapshot
+      nondeterminism: [model_decision, analyst_decision, vendor_response]
+      isolation: offline_case_sandbox
+      side_effect_mode: virtualized
+      verifier: release_outcome_predicate
+      min_trials: 3
+
+topology:
+  nodes: [agent, framework_runtime, vendor_gateway, review_service, case_store]
+  edges:
+    - [agent, framework_runtime]
+    - [framework_runtime, vendor_gateway]
+    - [vendor_gateway, review_service]
+    - [review_service, case_store]
+  channels:
+    screening_api:
+      sources: [agent, framework_runtime]
+      sinks: [case_store]
+      mediator: vendor_gateway
+
+threat_models:
+  cooperative:
+    trusted_capture_points: [agent, framework_runtime, case_gateway, vendor_gateway, identity_gateway, policy_registry, review_service, case_store, audit_sandbox]
+    accepted_integrity: [none, hash_chain, hmac-sha256]
+    mandatory_channels: [screening_api]
+  adversarial_agent:
+    compromised_producers: [agent]
+    trusted_capture_points: [framework_runtime, case_gateway, vendor_gateway, identity_gateway, policy_registry, review_service, case_store, audit_sandbox]
+    accepted_integrity: [hash_chain, hmac-sha256]
+    mandatory_channels: [screening_api]
+  best_effort_screening:
+    compromised_producers: [agent]
+    trusted_capture_points: [framework_runtime, case_gateway, vendor_gateway, identity_gateway, policy_registry, review_service, case_store, audit_sandbox]
+    accepted_integrity: [hash_chain, hmac-sha256]
+    mandatory_channels: []
+    bypass_edges: [[framework_runtime, review_service]]
+  no_replay:
+    compromised_producers: [agent]
+    trusted_capture_points: [framework_runtime, case_gateway, vendor_gateway, identity_gateway, policy_registry, review_service, case_store]
+    accepted_integrity: [hash_chain, hmac-sha256]
+    mandatory_channels: [screening_api]
+    available_mechanisms: [generic_case_trace, canonical_case_action, vendor_receipt, delegation_context, policy_snapshot, analyst_record, durable_case_receipt, screening_coverage]

@@ -1,0 +1,135 @@
+format: AuditSpec-model-adequacy-suite-v1
+created_at: "2026-08-14"
+scope: >-
+  Bounded concrete-to-abstract adequacy cases derived from the frozen v0.3.1
+  external-obligation challenge. These engineering formalizations are
+  project-authored and non-blind; they are not legal determinations.
+
+cases:
+  - id: external_payment_effect_governance_chain
+    pack: payment
+    source_refs: [nist_measure, eu_ai_act_logs]
+    kind: compliance
+    external_variables: {}
+    external_predicate: >-
+      ledger_commit_count == 0 or
+      (approval_action_bound and delegation_executor_bound and
+       policy_effective and gateway_coverage_complete)
+    abstract_query: >-
+      ledger_commit_count == 0 or
+      (approval_action_bound and delegation_executor_bound and
+       policy_effective and gateway_coverage_complete)
+
+  - id: external_payment_override_and_effect_consistency
+    pack: payment
+    source_refs: [nist_manage_4_1, nist_measure]
+    kind: attribution
+    external_variables: {}
+    external_predicate: >-
+      (model_recommendation == human_decision) or
+      (human_decision == 'approve' and ledger_commit_count > 0) or
+      (human_decision == 'deny' and ledger_commit_count == 0)
+    abstract_query: >-
+      (model_recommendation == human_decision) or
+      (human_decision == 'approve' and ledger_commit_count > 0) or
+      (human_decision == 'deny' and ledger_commit_count == 0)
+
+  - id: external_payment_six_month_log_retention
+    pack: payment
+    source_refs: [eu_ai_act_logs]
+    kind: retention
+    external_variables:
+      retention_days: [179, 180]
+      deletion_event_occurred: [false, true]
+      deployer_controls_logs: [false, true]
+    external_predicate: >-
+      retention_days >= 180 and not deletion_event_occurred and
+      deployer_controls_logs
+    abstract_query: null
+    missing_semantics:
+      [retention_days, deletion_event_occurred, deployer_controls_logs]
+
+  - id: external_credit_reason_actual_basis
+    pack: credit
+    source_refs: [regulation_b_reasons]
+    kind: compliance
+    external_variables: {}
+    external_predicate: >-
+      human_decision != 'deny' or
+      (model_reason_code == notice_reason_code and decision_record_bound and
+       feature_source_bound)
+    abstract_query: >-
+      human_decision != 'deny' or
+      (model_reason_code == notice_reason_code and decision_record_bound and
+       feature_source_bound)
+
+  - id: external_credit_data_policy_decision_chain
+    pack: credit
+    source_refs: [nist_measure]
+    kind: provenance
+    external_variables: {}
+    external_predicate: >-
+      decision_record_bound and feature_source_bound and
+      income_source_verified and policy_effective
+    abstract_query: >-
+      decision_record_bound and feature_source_bound and
+      income_source_verified and policy_effective
+
+  - id: external_credit_all_principal_factors_disclosed
+    pack: credit
+    source_refs: [regulation_b_reasons]
+    kind: completeness
+    external_variables:
+      scored_factor_set_complete: [false, true]
+      principal_factor_ranking_complete: [false, true]
+      notice_reason_set_complete: [false, true]
+    external_predicate: >-
+      scored_factor_set_complete and principal_factor_ranking_complete and
+      notice_reason_set_complete
+    abstract_query: null
+    missing_semantics:
+      [scored_factor_set_complete, principal_factor_ranking_complete,
+       notice_reason_set_complete]
+
+  - id: external_aml_release_supporting_chain
+    pack: aml
+    source_refs: [ffiec_sar_procedures, nist_measure]
+    kind: provenance
+    external_variables: {}
+    external_predicate: >-
+      analyst_decision != 'release' or
+      (vendor_response_bound and release_event_bound and
+       delegation_executor_bound)
+    abstract_query: >-
+      analyst_decision != 'release' or
+      (vendor_response_bound and release_event_bound and
+       delegation_executor_bound)
+
+  - id: external_aml_release_policy_basis
+    pack: aml
+    source_refs: [ffiec_sar_procedures]
+    kind: compliance
+    external_variables: {}
+    external_predicate: >-
+      analyst_decision != 'release' or
+      (vendor_signal == 'clear' and vendor_response_bound and
+       policy_release_on_clear and policy_effective and release_event_bound)
+    abstract_query: >-
+      analyst_decision != 'release' or
+      (vendor_signal == 'clear' and vendor_response_bound and
+       policy_release_on_clear and policy_effective and release_event_bound)
+
+  - id: external_aml_supporting_records_five_years
+    pack: aml
+    source_refs: [ffiec_sar_procedures]
+    kind: retention
+    external_variables:
+      retention_days: [1824, 1825]
+      record_deleted: [false, true]
+      preservation_policy_active: [false, true]
+    external_predicate: >-
+      retention_days >= 1825 and not record_deleted and
+      preservation_policy_active
+    abstract_query: null
+    missing_semantics:
+      [retention_days, record_deleted, preservation_policy_active]

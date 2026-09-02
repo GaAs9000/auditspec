@@ -1,0 +1,71 @@
+{
+  "format": "AuditSpec-catalog-freeze-v1",
+  "scope": "Mechanism payloads only; query expressions are excluded from catalog digests.",
+  "independent_preregistration": false,
+  "limitation": "This artifact manifest detects post-freeze catalog edits but is not an externally timestamped preregistration.",
+  "combined_catalog_sha256": "d60262903036d9253baea969b268bd339ae3b0b0258a0fd9787e11956e903e9f",
+  "packs": {
+    "aml": {
+      "spec": "aml-mechanism-lab",
+      "catalog_version": "2026-08-14-v1",
+      "mechanism_count": 12,
+      "catalog_sha256": "a3540cab8d382eef4680e51e5536def8ccd3d9e17df337b0942af53e87a984ea",
+      "query_splits": {
+        "development": [
+          "analyst_override_occurred",
+          "delegation_attributable",
+          "release_authorized",
+          "release_matches_durable_state",
+          "screening_policy_effective"
+        ],
+        "held_out": [
+          "no_screening_bypass",
+          "vendor_result_bound",
+          "vendor_signal_necessary_for_release"
+        ]
+      }
+    },
+    "credit": {
+      "spec": "credit-mechanism-lab",
+      "catalog_version": "2026-08-14-v1",
+      "mechanism_count": 14,
+      "catalog_sha256": "8abbb4b12de4dffc2596f08fc488fa06a7bc3c4347d2cc2e087e9fbb88dffbf9",
+      "query_splits": {
+        "development": [
+          "decision_policy_compliant",
+          "denial_effect_record_bound",
+          "feature_provenance_valid",
+          "human_override_occurred",
+          "notice_matches_model_reason"
+        ],
+        "held_out": [
+          "income_feature_necessary_for_denial",
+          "no_unlogged_feature",
+          "threshold_breach"
+        ]
+      }
+    },
+    "payment": {
+      "spec": "payment-mechanism-lab",
+      "catalog_version": "2026-08-14-v1",
+      "mechanism_count": 16,
+      "catalog_sha256": "01cc3597014a89624be73eba205e0c158d41c8d5be931e69de86a3d8f4fae17c",
+      "query_splits": {
+        "development": [
+          "delegation_attributable",
+          "human_override_occurred",
+          "policy_compliant",
+          "report_matches_ledger",
+          "settled_exactly_once",
+          "transfer_authorized"
+        ],
+        "held_out": [
+          "approval_applied_to_executed_action",
+          "excessive_transfer",
+          "no_out_of_band_effect",
+          "tool_response_necessary_for_duplicate"
+        ]
+      }
+    }
+  }
+}

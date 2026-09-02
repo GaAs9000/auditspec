@@ -1,0 +1,316 @@
+name: credit-mechanism-lab
+description: Bounded credit-decision model with feature provenance, policy versioning, adverse-action notice, review, coverage, and feature ablation.
+metadata:
+  domain: finance-credit
+  anchor_entity: application
+  identity_facts: [score]
+  catalog_version: 2026-08-14-v1
+  baselines:
+    final_only: [final_decision]
+    generic_trace: [final_decision, generic_decision_trace]
+    fixed_receipts: [canonical_application, decision_receipt, notice_receipt]
+    delegation_dual_graph: [canonical_application, feature_provenance, feature_coverage]
+    full_policy_environment: [canonical_application, policy_snapshot, feature_provenance, model_reason_record, decision_receipt, feature_coverage]
+    retain_all_passive: [final_decision, generic_decision_trace, canonical_application, policy_snapshot, feature_provenance, model_reason_record, decision_receipt, notice_receipt, feature_coverage, coarse_score_channel, coarse_credit_policy_channel, score_token, credit_policy_state_token]
+
+variables:
+  score: [580, 720]
+  model_decision: [approve, deny]
+  human_decision: [approve, deny]
+  policy_threshold: [600, 700]
+  policy_effective: [false, true]
+  income_source_verified: [false, true]
+  feature_source_bound: [false, true]
+  model_reason_code: [low_score, other]
+  notice_reason_code: [low_score, other]
+  decision_record_bound: [false, true]
+  feature_channel_complete: [false, true]
+  denial_without_income_feature: [false, true]
+
+constraints:
+  - "human_decision == 'deny' or not denial_without_income_feature"
+
+facts:
+  score: {domain: execution, entity: application, sensitivity: 3}
+  model_decision: {domain: model, entity: decision, sensitivity: 2}
+  human_decision: {domain: effect, entity: decision, sensitivity: 2}
+  policy_threshold: {domain: policy, entity: policy_version, sensitivity: 0}
+  policy_effective: {domain: policy, entity: policy_version, sensitivity: 0}
+  income_source_verified: {domain: data, entity: feature, sensitivity: 3}
+  feature_source_bound: {domain: data, entity: feature, sensitivity: 2}
+  model_reason_code: {domain: model, entity: decision, sensitivity: 2}
+  notice_reason_code: {domain: notice, entity: adverse_notice, sensitivity: 2}
+  decision_record_bound: {domain: effect, entity: decision, sensitivity: 1}
+  feature_channel_complete:
+    domain: data
+    entity: feature
+    sensitivity: 0
+    negative_evidence_channel: feature_ingest
+  denial_without_income_feature: {domain: replay, entity: replay_run, sensitivity: 3}
+
+queries:
+  decision_policy_compliant:
+    split: development
+    kind: compliance
+    expression: "policy_effective and ((score < policy_threshold) == (human_decision == 'deny'))"
+  feature_provenance_valid:
+    split: development
+    kind: provenance
+    expression: "income_source_verified and feature_source_bound"
+  human_override_occurred:
+    split: development
+    kind: attribution
+    expression: "model_decision != human_decision"
+  notice_matches_model_reason:
+    split: development
+    kind: compliance
+    expression: "model_reason_code == notice_reason_code and decision_record_bound"
+  denial_effect_record_bound:
+    split: development
+    kind: fact
+    expression: "human_decision == 'deny' and decision_record_bound"
+  no_unlogged_feature:
+    split: held_out
+    kind: coverage
+    expression: "feature_channel_complete"
+  threshold_breach:
+    split: held_out
+    kind: fact
+    expression: "score < policy_threshold"
+  income_feature_necessary_for_denial:
+    split: held_out
+    kind: causality
+    intervention_target: remove_income_feature
+    expression: "human_decision == 'deny' and not denial_without_income_feature"
+
+mechanisms:
+  final_decision:
+    mode: passive
+    producer: agent
+    capture_point: agent
+    trust_class: agent_asserted
+    facts: [human_decision]
+    integrity: none
+    adapter: agent-final
+    cost: {bytes: 72, privacy: 1, latency_ms: 0, fragility: 3}
+  generic_decision_trace:
+    mode: passive
+    producer: framework_runtime
+    capture_point: framework_runtime
+    trust_class: runtime_observed
+    facts: [model_decision, human_decision, model_reason_code]
+    capabilities: [bind:execution:model]
+    binding_edges: [application->decision]
+    integrity: hash_chain
+    adapter: generic-trace
+    cost: {bytes: 540, privacy: 4, latency_ms: 0.05, fragility: 2}
+  canonical_application:
+    mode: passive
+    producer: decision_gateway
+    capture_point: decision_gateway
+    trust_class: gateway_bound
+    facts: [score]
+    integrity: hmac-sha256
+    adapter: canonical-application
+    cost: {bytes: 230, privacy: 3, latency_ms: 0.05, fragility: 1}
+  policy_snapshot:
+    mode: passive
+    producer: policy_registry
+    capture_point: policy_registry
+    trust_class: signed_service
+    facts: [policy_threshold, policy_effective]
+    capabilities: [bind:execution:policy]
+    binding_edges: [application->policy_version]
+    requires: [canonical_application]
+    integrity: hmac-sha256
+    adapter: policy-snapshot
+    cost: {bytes: 266, privacy: 1, latency_ms: 0.08, fragility: 1}
+  feature_provenance:
+    mode: passive
+    producer: feature_gateway
+    capture_point: feature_gateway
+    trust_class: gateway_bound
+    facts: [income_source_verified, feature_source_bound]
+    capabilities: [bind:execution:data]
+    binding_edges: [application->feature]
+    requires: [canonical_application]
+    integrity: hmac-sha256
+    adapter: feature-provenance
+    cost: {bytes: 310, privacy: 4, latency_ms: 0.09, fragility: 1}
+  model_reason_record:
+    mode: passive
+    producer: model_gateway
+    capture_point: model_gateway
+    trust_class: runtime_observed
+    facts: [model_decision, model_reason_code]
+    capabilities: [bind:execution:model]
+    binding_edges: [application->decision]
+    requires: [canonical_application]
+    integrity: hash_chain
+    adapter: model-decision
+    cost: {bytes: 240, privacy: 3, latency_ms: 0.04, fragility: 2}
+  decision_receipt:
+    mode: passive
+    producer: decision_service
+    capture_point: decision_service
+    trust_class: signed_service
+    facts: [human_decision, decision_record_bound]
+    capabilities: [bind:execution:effect]
+    binding_edges: [application->decision]
+    requires: [canonical_application]
+    integrity: hmac-sha256
+    adapter: decision-receipt
+    cost: {bytes: 270, privacy: 3, latency_ms: 0.07, fragility: 1}
+  notice_receipt:
+    mode: passive
+    producer: notice_service
+    capture_point: notice_service
+    trust_class: signed_service
+    facts: [notice_reason_code]
+    capabilities: [bind:execution:notice]
+    binding_edges: [application->adverse_notice]
+    requires: [decision_receipt]
+    integrity: hmac-sha256
+    adapter: notice-receipt
+    cost: {bytes: 230, privacy: 2, latency_ms: 0.06, fragility: 1}
+  feature_coverage:
+    mode: passive
+    producer: feature_gateway
+    capture_point: feature_gateway
+    trust_class: gateway_bound
+    facts: [feature_channel_complete]
+    capabilities: [bind:execution:data]
+    binding_edges: [application->feature]
+    requires: [canonical_application]
+    coverage_channel: feature_ingest
+    integrity: hmac-sha256
+    adapter: feature-coverage
+    cost: {bytes: 136, privacy: 0, latency_ms: 0.02, fragility: 1}
+  coarse_score_channel:
+    mode: passive
+    producer: decision_gateway
+    capture_point: decision_gateway
+    trust_class: gateway_bound
+    observations:
+      - name: score_redacted
+        kind: bucket
+        sources: [score]
+        parameters: {boundaries: [], labels: [redacted]}
+        output_type: bucket
+        entity: application
+    integrity: hmac-sha256
+    adapter: coarse-bucket
+    capture: deliberately uninformative score class
+    cost: {bytes: 32, privacy: 0, latency_ms: 0.01, fragility: 1}
+  coarse_credit_policy_channel:
+    mode: passive
+    producer: policy_registry
+    capture_point: policy_registry
+    trust_class: signed_service
+    binding_edges: [application->policy_version]
+    observations:
+      - name: threshold_redacted
+        kind: bucket
+        sources: [policy_threshold]
+        parameters: {boundaries: [], labels: [redacted]}
+        output_type: bucket
+        entity: policy_version
+      - name: policy_effective_present
+        kind: presence
+        sources: [policy_effective]
+        output_type: boolean
+        entity: policy_version
+    integrity: hmac-sha256
+    adapter: coarse-bucket
+    capture: application-bound but lossy credit-policy metadata
+    cost: {bytes: 46, privacy: 0, latency_ms: 0.01, fragility: 1}
+  score_token:
+    mode: passive
+    producer: decision_gateway
+    capture_point: decision_gateway
+    trust_class: gateway_bound
+    observations:
+      - name: score_domain_token
+        kind: digest
+        sources: [score]
+        parameters: {namespace: credit-score-v1}
+        output_type: digest
+        entity: application
+    integrity: hmac-sha256
+    adapter: digest-token
+    capture: deterministic bounded-domain token for the normalized score
+    cost: {bytes: 94, privacy: 1, latency_ms: 0.02, fragility: 1}
+  credit_policy_state_token:
+    mode: passive
+    producer: policy_registry
+    capture_point: policy_registry
+    trust_class: signed_service
+    binding_edges: [application->policy_version]
+    observations:
+      - name: credit_policy_state_domain_token
+        kind: digest
+        sources: [policy_threshold, policy_effective]
+        parameters: {namespace: credit-policy-state-v1}
+        output_type: digest
+        entity: policy_version
+    integrity: hmac-sha256
+    adapter: digest-token
+    capture: application-bound token for the bounded policy state
+    cost: {bytes: 110, privacy: 1, latency_ms: 0.03, fragility: 1}
+  virtualized_income_ablation:
+    mode: active
+    producer: audit_sandbox
+    capture_point: audit_sandbox
+    trust_class: isolated_replay
+    facts: [denial_without_income_feature]
+    capabilities: [bind:execution:replay]
+    binding_edges: [application->replay_run]
+    requires: [canonical_application, model_reason_record, decision_receipt]
+    integrity: hmac-sha256
+    adapter: feature-ablation
+    cost: {bytes: 820, privacy: 4, latency_ms: 3.8, fragility: 3}
+    replay:
+      target: remove_income_feature
+      prefix_checkpoint: before_model_decision
+      snapshot: application_feature_snapshot
+      nondeterminism: [model_output, policy_version]
+      isolation: offline_decision_sandbox
+      side_effect_mode: virtualized
+      verifier: denial_outcome_predicate
+      min_trials: 3
+
+topology:
+  nodes: [agent, framework_runtime, feature_gateway, model_gateway, decision_service]
+  edges:
+    - [agent, framework_runtime]
+    - [framework_runtime, feature_gateway]
+    - [feature_gateway, model_gateway]
+    - [model_gateway, decision_service]
+  channels:
+    feature_ingest:
+      sources: [agent, framework_runtime]
+      sinks: [decision_service]
+      mediator: feature_gateway
+
+threat_models:
+  cooperative:
+    trusted_capture_points: [agent, framework_runtime, decision_gateway, policy_registry, feature_gateway, model_gateway, decision_service, notice_service, audit_sandbox]
+    accepted_integrity: [none, hash_chain, hmac-sha256]
+    mandatory_channels: [feature_ingest]
+  adversarial_agent:
+    compromised_producers: [agent]
+    trusted_capture_points: [framework_runtime, decision_gateway, policy_registry, feature_gateway, model_gateway, decision_service, notice_service, audit_sandbox]
+    accepted_integrity: [hash_chain, hmac-sha256]
+    mandatory_channels: [feature_ingest]
+  best_effort_features:
+    compromised_producers: [agent]
+    trusted_capture_points: [framework_runtime, decision_gateway, policy_registry, feature_gateway, model_gateway, decision_service, notice_service, audit_sandbox]
+    accepted_integrity: [hash_chain, hmac-sha256]
+    mandatory_channels: []
+    bypass_edges: [[framework_runtime, model_gateway]]
+  no_replay:
+    compromised_producers: [agent]
+    trusted_capture_points: [framework_runtime, decision_gateway, policy_registry, feature_gateway, model_gateway, decision_service, notice_service]
+    accepted_integrity: [hash_chain, hmac-sha256]
+    mandatory_channels: [feature_ingest]
+    available_mechanisms: [generic_decision_trace, canonical_application, policy_snapshot, feature_provenance, model_reason_record, decision_receipt, notice_receipt, feature_coverage]

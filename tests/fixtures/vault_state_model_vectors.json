@@ -1,0 +1,51 @@
+{
+  "schema": "AuditSpec-vault-independent-state-model-vectors-v1",
+  "model": "tests/reference_models/vault_model.py",
+  "scope": {
+    "generated_sequence_model": "Python Hypothesis state machine",
+    "cross_runtime_projection": "bounded semantic vectors consumed by Python and Rust",
+    "filesystem_crash_scope": "four explicit persistence cuts; not an exhaustive filesystem claim"
+  },
+  "cases": [
+    {
+      "case_id": "shared_component_delete",
+      "expected": {
+        "physical_deleted": false,
+        "retained_by_live_evidence_ids": [],
+        "retained_by_component_refs": [
+          "schema:payment-evidence:1"
+        ],
+        "object_survives": true
+      }
+    },
+    {
+      "case_id": "hold_deadline_release",
+      "expected": {
+        "held_retention_status": "LEGAL_HOLD",
+        "held_retrieval_status": "READY_FOR_REVERIFICATION",
+        "released_retention_status": "DELETION_REQUIRED",
+        "released_retrieval_status": "LIFECYCLE_GAP",
+        "released_primary_failure": "RETENTION_NONCOMPLIANCE"
+      }
+    },
+    {
+      "case_id": "shared_evidence_delete_sequence",
+      "expected": {
+        "first_physical_deleted": false,
+        "first_retained_by_live_evidence_ids": [
+          "evidence.payment.2"
+        ],
+        "second_physical_deleted": true,
+        "object_survives_after_first": true,
+        "object_survives_after_second": false
+      }
+    },
+    {
+      "case_id": "routine_revocation_boundary",
+      "expected": {
+        "capture_before_revocation": "READY_FOR_REVERIFICATION",
+        "capture_at_or_after_revocation": "HISTORIC_KEY_UNRESOLVED"
+      }
+    }
+  ]
+}
