@@ -20,9 +20,11 @@ AuditSpec follows semantic versioning for the Python package and Rust CLI.
 | retirement blocks future capture | yes | yes |
 | hold/deletion attribution semantics | yes | yes |
 | audit-time JSON predicate verification | yes | yes |
+| claim-relative migration enforcement | yes | yes |
+| migration certificate verification | yes | yes |
+| quotient and exact contract synthesis | yes | verification consumer |
 | independent finite-world compiler | yes | consumer/verification path |
 
 Both implementations use the same canonical JSON and domain-separated digest
 rules. Language parity does not replace an independent semantic oracle; the
 Python public tests also compare Vault behavior to a separate state model.
-

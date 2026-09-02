@@ -69,6 +69,26 @@ This makes retirement an executable lifecycle restriction rather than a comment.
 These terminals describe support under the supplied bundle and trust context;
 they do not establish capture truth or open-world completeness.
 
+## Claim-relative migrations
+
+A schema can be globally lossy while remaining sufficient for a particular
+claim. When schema metadata uses the lossy migration mode, the Vault accepts an
+optional claim-relative migration bundle. The bundle binds one deterministic
+transformation table to a lifecycle certificate for each named claim.
+
+- **PRESERVED** means the claim decoder is constant on every transformation
+  fiber, so audit-time verification may continue.
+- **HARD_SEMANTIC_GAP** means the bundle carries two source states that the
+  migration merges even though their claim values differ. Retrieval returns
+  **MIGRATION_CLAIM_INFORMATION_LOSS**.
+- an absent, malformed, or mismatched bundle fails closed as
+  **MIGRATION_CERTIFICATE_INVALID**.
+
+This certificate changes neither capture truth nor trust in the declared
+transformation table. It establishes only the finite claim-relative
+factorization encoded by that table. See
+[the information-order calculus](INFORMATION_ORDER.md).
+
 ## Deployment checklist
 
 - retain the manifest root outside the Vault directory; retain acknowledged

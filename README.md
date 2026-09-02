@@ -37,7 +37,11 @@ status and direct CLI examples.
 
 - typed claim and mechanism specifications;
 - finite-model evidence determinacy checks;
-- least-cost contract synthesis inside a declared catalog;
+- information-order and claim-quotient certificates;
+- dependency-closed least-cost contract synthesis inside a declared catalog;
+- separation, deletion-minimality, and optimality witnesses;
+- claim-relative lifecycle and migration certificates;
+- hard semantic versus soft trust/interpretability obstruction classes;
 - typed model, evidence, mediation, inventory, trust, and lifecycle gaps;
 - an append-only Evidence Vault with signed events and content-addressed data;
 - audit-time retrieval and re-verification;
@@ -82,6 +86,7 @@ independently verified institution credential.
 Detailed operational boundaries:
 
 - [Threat model](docs/THREAT_MODEL.md)
+- [Information-order calculus](docs/INFORMATION_ORDER.md)
 - [Vault trust and lifecycle model](docs/VAULT_TRUST_MODEL.md)
 - [Compatibility and Python/Rust parity](docs/COMPATIBILITY.md)
 - [Release procedure](docs/RELEASING.md)
