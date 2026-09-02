@@ -84,6 +84,7 @@ Detailed operational boundaries:
 - [Threat model](docs/THREAT_MODEL.md)
 - [Vault trust and lifecycle model](docs/VAULT_TRUST_MODEL.md)
 - [Compatibility and Python/Rust parity](docs/COMPATIBILITY.md)
+- [Release procedure](docs/RELEASING.md)
 - [Security policy](SECURITY.md)
 
 ## License

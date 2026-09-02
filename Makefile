@@ -1,4 +1,4 @@
-.PHONY: install quickstart test verify rust
+.PHONY: install quickstart test verify wheel rust
 
 install:
 	python -m pip install -e '.[all]'
@@ -13,6 +13,9 @@ verify:
 	python scripts/freeze_catalog.py
 	auditctl examples/payment.yaml summary
 	auditvault --help
+
+wheel:
+	SOURCE_DATE_EPOCH=1704067200 python -m build --wheel
 
 rust:
 	cargo fmt --all --manifest-path rust/auditspec/Cargo.toml -- --check

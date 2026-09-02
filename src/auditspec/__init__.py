@@ -35,7 +35,7 @@ __all__ = [
     "verify_p_minimality_certificate",
     "verify_declared_schedule_closure_certificate",
 ]
-__version__ = "1.1.3"
+__version__ = "1.2.0"
 
 
 def __getattr__(name: str) -> Any:
