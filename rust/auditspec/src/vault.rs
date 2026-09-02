@@ -13,6 +13,7 @@ use regex::Regex;
 use serde_json::{Map, Value, json};
 
 use crate::canonical::{canonical_bytes, digest, json_line, raw_sha256, strict_json_loads};
+use crate::information_order::verify_migration_bundle;
 use crate::predicate;
 use crate::{Result, invalid};
 
@@ -900,6 +901,7 @@ impl EvidenceVault {
             material.insert(evidence_id.to_owned(), data);
         }
         gaps = deduplicate_gaps(gaps)?;
+        let obstructions = obstruction_rows(&gaps)?;
         let assurance = self.assurance(Some(&state))?;
         let mut record = json!({
             "schema": RETRIEVAL_SCHEMA,
@@ -910,6 +912,7 @@ impl EvidenceVault {
             "status": if gaps.is_empty() {"READY_FOR_REVERIFICATION"} else {"LIFECYCLE_GAP"},
             "primary_failure": gaps.first().cloned(),
             "additional_detected_failures": if gaps.len() > 1 {gaps[1..].to_vec()} else {Vec::new()},
+            "obstructions": obstructions,
             "retrieved_evidence_ids": material.keys().cloned().collect::<Vec<_>>(),
             "retrieved_evidence_count": material.len(),
             "journal_event_count": state.event_count,
@@ -954,7 +957,8 @@ impl EvidenceVault {
                 "verdict": "LIFECYCLE_GAP",
                 "claim_value": null,
                 "primary_failure": field(&retrieval.record, "primary_failure")?.clone(),
-                "additional_detected_failures": field(&retrieval.record, "additional_detected_failures")?.clone()
+                "additional_detected_failures": field(&retrieval.record, "additional_detected_failures")?.clone(),
+                "obstructions": field(&retrieval.record, "obstructions")?.clone()
             }))?.clone());
             return with_proof(REVERIFY_SCHEMA, Value::Object(body));
         }
@@ -977,7 +981,12 @@ impl EvidenceVault {
                         "subtype": "CLAIM_EVIDENCE_ABSENT",
                         "claim_id": claim_id
                     },
-                    "additional_detected_failures": []
+                    "additional_detected_failures": [],
+                    "obstructions": [{
+                        "subtype": "CLAIM_EVIDENCE_ABSENT",
+                        "claim_id": claim_id,
+                        "obstruction_class": "INVENTORY_OBSTRUCTION"
+                    }]
                 }))?
                 .clone(),
             );
@@ -1024,6 +1033,7 @@ impl EvidenceVault {
             "claim_value": claim_value,
             "primary_failure": null,
             "additional_detected_failures": [],
+            "obstructions": [],
             "verifier_ref": verifier_ref,
             "evidence_value_root": digest("AuditSpec-evidence-vault-reverified-values-v1", &values_value)?
         }))?.clone());
@@ -1229,17 +1239,27 @@ impl EvidenceVault {
             }
             let metadata = field(&component.body, "metadata")?;
             if field_name == "schema_ref"
-                && (field(metadata, "readable").ok().and_then(Value::as_bool) != Some(true)
-                    || field_str(metadata, "migration_mode").ok() == Some("lossy"))
+                && field(metadata, "readable").ok().and_then(Value::as_bool) != Some(true)
             {
-                gaps.push(gap(
-                    if field_str(metadata, "migration_mode").ok() == Some("lossy") {
-                        "LOSSY_SCHEMA_MIGRATION"
-                    } else {
-                        subtype
-                    },
-                    evidence_id,
-                ));
+                gaps.push(gap(subtype, evidence_id));
+            } else if field_name == "schema_ref"
+                && field_str(metadata, "migration_mode").ok() == Some("lossy")
+            {
+                match object(metadata)?.get("claim_relative_migration") {
+                    None => gaps.push(gap("LOSSY_SCHEMA_MIGRATION", evidence_id)),
+                    Some(bundle) => {
+                        match verify_migration_bundle(bundle, field_str(evidence, "claim_id")?) {
+                            Err(_) => gaps.push(gap("MIGRATION_CERTIFICATE_INVALID", evidence_id)),
+                            Ok(certificate) => match field_str(&certificate, "status")? {
+                                "PRESERVED" => {}
+                                "HARD_SEMANTIC_GAP" => {
+                                    gaps.push(gap("MIGRATION_CLAIM_INFORMATION_LOSS", evidence_id))
+                                }
+                                _ => gaps.push(gap("MIGRATION_CERTIFICATE_INVALID", evidence_id)),
+                            },
+                        }
+                    }
+                }
             } else {
                 let metadata_invalid = (field_name == "verifier_ref"
                     && field(metadata, "archive_executable")
@@ -2001,19 +2021,48 @@ fn gap(subtype: &str, evidence_id: &str) -> Value {
     json!({"subtype": subtype, "evidence_id": evidence_id})
 }
 
+fn obstruction_rows(gaps: &[Value]) -> Result<Vec<Value>> {
+    let hard = BTreeSet::from([
+        "EVIDENCE_INTEGRITY_FAILURE",
+        "EVIDENCE_UNAVAILABLE",
+        "LEGAL_DELETION_PREVENTS_REVERIFY",
+        "LOSSY_SCHEMA_MIGRATION",
+        "MIGRATION_CLAIM_INFORMATION_LOSS",
+        "RETENTION_NONCOMPLIANCE",
+    ]);
+    gaps.iter()
+        .map(|row| {
+            let subtype = field_str(row, "subtype")?;
+            Ok(json!({
+                "subtype": subtype,
+                "evidence_id": field(row, "evidence_id")?.clone(),
+                "obstruction_class": if hard.contains(subtype) {
+                    "HARD_SEMANTIC_OBSTRUCTION"
+                } else if subtype == "MIGRATION_CERTIFICATE_INVALID" {
+                    "VERIFICATION_FAILURE"
+                } else {
+                    "SOFT_TRUST_INTERPRETABILITY_OBSTRUCTION"
+                }
+            }))
+        })
+        .collect()
+}
+
 fn deduplicate_gaps(gaps: Vec<Value>) -> Result<Vec<Value>> {
     let priority = BTreeMap::from([
         ("EVIDENCE_INTEGRITY_FAILURE", 0),
         ("HISTORIC_KEY_UNRESOLVED", 1),
         ("UNREADABLE_SCHEMA", 2),
         ("LOSSY_SCHEMA_MIGRATION", 3),
-        ("VERIFIER_UNAVAILABLE", 4),
-        ("VERSION_ROOT_UNRESOLVED", 5),
-        ("BRIDGE_UNRESOLVED", 6),
-        ("BRIDGE_EXPIRED_OR_REVOKED", 7),
-        ("RETENTION_NONCOMPLIANCE", 8),
-        ("LEGAL_DELETION_PREVENTS_REVERIFY", 9),
-        ("EVIDENCE_UNAVAILABLE", 10),
+        ("MIGRATION_CLAIM_INFORMATION_LOSS", 4),
+        ("MIGRATION_CERTIFICATE_INVALID", 5),
+        ("VERIFIER_UNAVAILABLE", 6),
+        ("VERSION_ROOT_UNRESOLVED", 7),
+        ("BRIDGE_UNRESOLVED", 8),
+        ("BRIDGE_EXPIRED_OR_REVOKED", 9),
+        ("RETENTION_NONCOMPLIANCE", 10),
+        ("LEGAL_DELETION_PREVENTS_REVERIFY", 11),
+        ("EVIDENCE_UNAVAILABLE", 12),
     ]);
     let mut unique = BTreeMap::new();
     for row in gaps {

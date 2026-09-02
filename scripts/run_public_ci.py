@@ -17,6 +17,7 @@ PUBLIC_TESTS = (
     "tests/test_extension_manifest.py",
     "tests/test_external_evidence.py",
     "tests/test_information.py",
+    "tests/test_information_order.py",
     "tests/test_inventory_authority.py",
     "tests/test_isolated_verifier.py",
     "tests/test_model_adequacy.py",

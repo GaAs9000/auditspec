@@ -514,6 +514,94 @@ fn external_pin_and_journal_rotation_close_directory_substitution() {
 }
 
 #[test]
+fn vault_applies_python_claim_relative_migration_certificate() {
+    let temp = TempDir::new().unwrap();
+    let vault = new_vault(&temp, "claim-relative", routine_key(), None);
+    let bundle: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/claim_relative_migration_bundle.json"
+    ))
+    .unwrap();
+    vault
+        .archive_component(
+            "schema",
+            "migrated",
+            "1",
+            br#"{"type":"object"}"#,
+            "application/json",
+            json!({
+                "readable": true,
+                "migration_mode": "lossy",
+                "claim_relative_migration": bundle
+            }),
+            T0,
+        )
+        .unwrap();
+    for (slug, field_name) in [("approval", "approval"), ("comment", "comment")] {
+        vault
+            .archive_component(
+                "verifier",
+                slug,
+                "1",
+                &canonical_bytes(&json!({
+                    "schema": "AuditSpec-vault-json-predicate-verifier-v1",
+                    "predicate": {
+                        "op": "eq",
+                        "left": {"op": "field", "name": field_name},
+                        "right": {"op": "const", "value": true}
+                    }
+                }))
+                .unwrap(),
+                "application/json",
+                json!({"archive_executable": true}),
+                T0,
+            )
+            .unwrap();
+        vault
+            .append_evidence(
+                &format!("evidence.{slug}"),
+                &format!("claim.{slug}"),
+                "run.migration.1",
+                br#"{"approval":true}"#,
+                "application/json",
+                "schema:migrated:1",
+                "key:producer-key:1",
+                &format!("verifier:{slug}:1"),
+                "policy:payment-policy:1",
+                json!({
+                    "type": "declared_closed_world",
+                    "scope_commitment": "1".repeat(64),
+                    "universe_root": "2".repeat(64)
+                }),
+                T0,
+                T1,
+                T3,
+                T0,
+            )
+            .unwrap();
+        vault
+            .create_bundle(&format!("bundle.{slug}"), &[format!("evidence.{slug}")], T0)
+            .unwrap();
+    }
+    let positive = vault
+        .reverify_json_predicate("bundle.approval", "claim.approval", T2)
+        .unwrap();
+    assert_eq!(positive["verdict"], "SUPPORTED");
+    assert_eq!(positive["obstructions"], json!([]));
+    let hard = vault
+        .reverify_json_predicate("bundle.comment", "claim.comment", T2)
+        .unwrap();
+    assert_eq!(hard["verdict"], "LIFECYCLE_GAP");
+    assert_eq!(
+        hard["primary_failure"]["subtype"],
+        "MIGRATION_CLAIM_INFORMATION_LOSS"
+    );
+    assert_eq!(
+        hard["obstructions"][0]["obstruction_class"],
+        "HARD_SEMANTIC_OBSTRUCTION"
+    );
+}
+
+#[test]
 fn component_alias_prevents_physical_evidence_object_deletion() {
     let expected = independent_model_case("shared_component_delete");
     let temp = TempDir::new().unwrap();

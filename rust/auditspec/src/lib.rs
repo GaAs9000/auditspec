@@ -1,6 +1,7 @@
 //! Standalone Rust consumer for AuditSpec Vault and verifier material.
 
 pub mod canonical;
+pub mod information_order;
 pub mod predicate;
 pub mod trust;
 pub mod vault;

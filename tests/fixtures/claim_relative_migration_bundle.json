@@ -1,0 +1,163 @@
+{
+  "bundle_root": "91e75f9f8b250afac97fb25c1c6e0bc2653b6762c8a4ef65925e685143167024",
+  "certificates": {
+    "claim.approval": {
+      "boundaries": {
+        "finite_declared_image_only": true,
+        "open_world_completeness_proven": false,
+        "transformation_semantics_supplied": true
+      },
+      "certificate_root": "9425144ead854bf20c28906f64338165fb4bab4607f7c4db09be10fba1dad672",
+      "claim_id": "claim.approval",
+      "induced_decoder": [
+        {
+          "claim_value": false,
+          "transformed_evidence": {
+            "approval": false
+          }
+        },
+        {
+          "claim_value": true,
+          "transformed_evidence": {
+            "approval": true
+          }
+        }
+      ],
+      "kernel_inclusion": true,
+      "lifecycle_twin": null,
+      "rows": [
+        {
+          "claim_value": false,
+          "source_evidence": {
+            "approval": false,
+            "comment": false
+          },
+          "state_id": "w00",
+          "transformed_evidence": {
+            "approval": false
+          }
+        },
+        {
+          "claim_value": false,
+          "source_evidence": {
+            "approval": false,
+            "comment": true
+          },
+          "state_id": "w01",
+          "transformed_evidence": {
+            "approval": false
+          }
+        },
+        {
+          "claim_value": true,
+          "source_evidence": {
+            "approval": true,
+            "comment": false
+          },
+          "state_id": "w10",
+          "transformed_evidence": {
+            "approval": true
+          }
+        },
+        {
+          "claim_value": true,
+          "source_evidence": {
+            "approval": true,
+            "comment": true
+          },
+          "state_id": "w11",
+          "transformed_evidence": {
+            "approval": true
+          }
+        }
+      ],
+      "schema": "AuditSpec-claim-relative-lifecycle-certificate-v1",
+      "source_factorization_root": "d7c0dd631f96e87391a78c83bfc6b0a93a8af2e752a7aa9478d40d9d93217497",
+      "source_image_root": "0fed9676d1ea00079bb2e55a2d9bc8ede40c7cff45f51d8214bd95232b21e7c1",
+      "status": "PRESERVED",
+      "transformation_id": "migration.drop-comment",
+      "transformation_table_root": "ea44fc6f89bc67a53c8933c36183f7b7e8e5bd70ba31dc58ff6d2936030a7446",
+      "transformed_image_root": "907166b0036590996eeed5e3a9f5e507a7aa2041e7ef50a3545f0bebc039583f"
+    },
+    "claim.comment": {
+      "boundaries": {
+        "finite_declared_image_only": true,
+        "open_world_completeness_proven": false,
+        "transformation_semantics_supplied": true
+      },
+      "certificate_root": "4280db88492edf824daecd7e259f301231f4664ed43a1a953cce17612353d732",
+      "claim_id": "claim.comment",
+      "induced_decoder": [],
+      "kernel_inclusion": false,
+      "lifecycle_twin": {
+        "left_claim_value": false,
+        "left_id": "w00",
+        "right_claim_value": true,
+        "right_id": "w01",
+        "shared_value": {
+          "approval": false
+        },
+        "witness_root": "f3ec19e5ffd8edfa408be015aa5b8c3a2cc248a9a2e8830dd6c3dec022f00a65"
+      },
+      "rows": [
+        {
+          "claim_value": false,
+          "source_evidence": {
+            "approval": false,
+            "comment": false
+          },
+          "state_id": "w00",
+          "transformed_evidence": {
+            "approval": false
+          }
+        },
+        {
+          "claim_value": true,
+          "source_evidence": {
+            "approval": false,
+            "comment": true
+          },
+          "state_id": "w01",
+          "transformed_evidence": {
+            "approval": false
+          }
+        },
+        {
+          "claim_value": false,
+          "source_evidence": {
+            "approval": true,
+            "comment": false
+          },
+          "state_id": "w10",
+          "transformed_evidence": {
+            "approval": true
+          }
+        },
+        {
+          "claim_value": true,
+          "source_evidence": {
+            "approval": true,
+            "comment": true
+          },
+          "state_id": "w11",
+          "transformed_evidence": {
+            "approval": true
+          }
+        }
+      ],
+      "schema": "AuditSpec-claim-relative-lifecycle-certificate-v1",
+      "source_factorization_root": "0b51515d5bafed6e569ef23000c8d60912d33b8a6768e6d4fa302095f680a745",
+      "source_image_root": "0fed9676d1ea00079bb2e55a2d9bc8ede40c7cff45f51d8214bd95232b21e7c1",
+      "status": "HARD_SEMANTIC_GAP",
+      "transformation_id": "migration.drop-comment",
+      "transformation_table_root": "ea44fc6f89bc67a53c8933c36183f7b7e8e5bd70ba31dc58ff6d2936030a7446",
+      "transformed_image_root": "907166b0036590996eeed5e3a9f5e507a7aa2041e7ef50a3545f0bebc039583f"
+    }
+  },
+  "claim_ids": [
+    "claim.approval",
+    "claim.comment"
+  ],
+  "schema": "AuditSpec-claim-relative-migration-bundle-v1",
+  "transformation_id": "migration.drop-comment"
+}

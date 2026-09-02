@@ -27,6 +27,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 
 from .canonical import canonical_bytes, canonical_json, digest, raw_sha256, strict_json_loads
+from .information_order import InformationOrderError, verify_migration_bundle
 from .predicate import evaluate_predicate
 
 
@@ -756,6 +757,7 @@ class EvidenceVault:
             )
             material[evidence_id] = data
         gaps = _deduplicate_gaps(gaps)
+        obstructions = _obstruction_rows(gaps)
         vault_assurance = self.assurance(state)
         record = {
             "schema": RETRIEVAL_SCHEMA,
@@ -766,6 +768,7 @@ class EvidenceVault:
             "status": "READY_FOR_REVERIFICATION" if not gaps else "LIFECYCLE_GAP",
             "primary_failure": gaps[0] if gaps else None,
             "additional_detected_failures": gaps[1:],
+            "obstructions": obstructions,
             "retrieved_evidence_ids": sorted(material),
             "retrieved_evidence_count": len(material),
             "journal_event_count": state["event_count"],
@@ -818,6 +821,7 @@ class EvidenceVault:
                 "additional_detected_failures": retrieval.record[
                     "additional_detected_failures"
                 ],
+                "obstructions": retrieval.record["obstructions"],
             }
             return {**body, "proof_digest": digest(REVERIFY_SCHEMA, body)}
         state = self.replay()
@@ -837,6 +841,13 @@ class EvidenceVault:
                     "claim_id": claim_id,
                 },
                 "additional_detected_failures": [],
+                "obstructions": [
+                    {
+                        "subtype": "CLAIM_EVIDENCE_ABSENT",
+                        "claim_id": claim_id,
+                        "obstruction_class": "INVENTORY_OBSTRUCTION",
+                    }
+                ],
             }
             return {**body, "proof_digest": digest(REVERIFY_SCHEMA, body)}
         verifier_refs = {row["verifier_ref"] for row in evidence_records}
@@ -863,6 +874,7 @@ class EvidenceVault:
             "claim_value": claim_value,
             "primary_failure": None,
             "additional_detected_failures": [],
+            "obstructions": [],
             "verifier_ref": next(iter(verifier_refs)),
             "evidence_value_root": digest(
                 "AuditSpec-evidence-vault-reverified-values-v1", values
@@ -1020,18 +1032,41 @@ class EvidenceVault:
                 gaps.append(_gap(subtype, evidence["evidence_id"]))
                 continue
             metadata = component["body"]["metadata"]
-            if field == "schema_ref" and (
-                metadata.get("readable") is not True
-                or metadata.get("migration_mode") == "lossy"
-            ):
-                gaps.append(
-                    _gap(
-                        "LOSSY_SCHEMA_MIGRATION"
-                        if metadata.get("migration_mode") == "lossy"
-                        else subtype,
-                        evidence["evidence_id"],
+            if field == "schema_ref" and metadata.get("readable") is not True:
+                gaps.append(_gap(subtype, evidence["evidence_id"]))
+            elif field == "schema_ref" and metadata.get("migration_mode") == "lossy":
+                bundle = metadata.get("claim_relative_migration")
+                if bundle is None:
+                    gaps.append(
+                        _gap("LOSSY_SCHEMA_MIGRATION", evidence["evidence_id"])
                     )
-                )
+                else:
+                    try:
+                        certificate = verify_migration_bundle(
+                            bundle, claim_id=evidence["claim_id"]
+                        )
+                    except (InformationOrderError, KeyError, TypeError, ValueError):
+                        gaps.append(
+                            _gap(
+                                "MIGRATION_CERTIFICATE_INVALID",
+                                evidence["evidence_id"],
+                            )
+                        )
+                    else:
+                        if certificate["status"] == "HARD_SEMANTIC_GAP":
+                            gaps.append(
+                                _gap(
+                                    "MIGRATION_CLAIM_INFORMATION_LOSS",
+                                    evidence["evidence_id"],
+                                )
+                            )
+                        elif certificate["status"] != "PRESERVED":
+                            gaps.append(
+                                _gap(
+                                    "MIGRATION_CERTIFICATE_INVALID",
+                                    evidence["evidence_id"],
+                                )
+                            )
             elif field == "verifier_ref" and metadata.get("archive_executable") is not True:
                 gaps.append(_gap(subtype, evidence["evidence_id"]))
             elif field == "key_ref" and not _historic_key_valid(
@@ -1652,19 +1687,48 @@ def _gap(subtype: str, evidence_id: str) -> dict[str, str]:
     return {"subtype": subtype, "evidence_id": evidence_id}
 
 
+def _obstruction_rows(gaps: Sequence[dict[str, str]]) -> list[dict[str, str]]:
+    hard = {
+        "EVIDENCE_INTEGRITY_FAILURE",
+        "EVIDENCE_UNAVAILABLE",
+        "LEGAL_DELETION_PREVENTS_REVERIFY",
+        "LOSSY_SCHEMA_MIGRATION",
+        "MIGRATION_CLAIM_INFORMATION_LOSS",
+        "RETENTION_NONCOMPLIANCE",
+    }
+    verification = {"MIGRATION_CERTIFICATE_INVALID"}
+    return [
+        {
+            **row,
+            "obstruction_class": (
+                "HARD_SEMANTIC_OBSTRUCTION"
+                if row["subtype"] in hard
+                else (
+                    "VERIFICATION_FAILURE"
+                    if row["subtype"] in verification
+                    else "SOFT_TRUST_INTERPRETABILITY_OBSTRUCTION"
+                )
+            ),
+        }
+        for row in gaps
+    ]
+
+
 def _deduplicate_gaps(gaps: Sequence[dict[str, str]]) -> list[dict[str, str]]:
     priority = {
         "EVIDENCE_INTEGRITY_FAILURE": 0,
         "HISTORIC_KEY_UNRESOLVED": 1,
         "UNREADABLE_SCHEMA": 2,
         "LOSSY_SCHEMA_MIGRATION": 3,
-        "VERIFIER_UNAVAILABLE": 4,
-        "VERSION_ROOT_UNRESOLVED": 5,
-        "BRIDGE_UNRESOLVED": 6,
-        "BRIDGE_EXPIRED_OR_REVOKED": 7,
-        "RETENTION_NONCOMPLIANCE": 8,
-        "LEGAL_DELETION_PREVENTS_REVERIFY": 9,
-        "EVIDENCE_UNAVAILABLE": 10,
+        "MIGRATION_CLAIM_INFORMATION_LOSS": 4,
+        "MIGRATION_CERTIFICATE_INVALID": 5,
+        "VERIFIER_UNAVAILABLE": 6,
+        "VERSION_ROOT_UNRESOLVED": 7,
+        "BRIDGE_UNRESOLVED": 8,
+        "BRIDGE_EXPIRED_OR_REVOKED": 9,
+        "RETENTION_NONCOMPLIANCE": 10,
+        "LEGAL_DELETION_PREVENTS_REVERIFY": 11,
+        "EVIDENCE_UNAVAILABLE": 12,
     }
     unique = {(row["subtype"], row["evidence_id"]): row for row in gaps}
     return sorted(
