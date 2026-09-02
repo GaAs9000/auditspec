@@ -74,7 +74,9 @@ def _commit_count(policy: str, tool_response: str) -> int:
 
 @lru_cache(maxsize=1)
 def _payment_spec() -> AuditSpec:
-    return load_spec(Path(__file__).resolve().parents[3] / "examples" / "payment.yaml")
+    source_path = Path(__file__).resolve().parents[3] / "examples" / "payment.yaml"
+    package_path = Path(__file__).resolve().parents[1] / "data" / "examples" / "payment.yaml"
+    return load_spec(source_path if source_path.is_file() else package_path)
 
 
 def build_payment_graph(spec: AuditSpec | None = None):

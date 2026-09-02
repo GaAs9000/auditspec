@@ -55,6 +55,20 @@ jobs:
       - run: python -m pip install --upgrade pip build
       - run: python -m build --wheel
       - run: python -m venv /tmp/auditspec-consumer
-      - run: /tmp/auditspec-consumer/bin/pip install dist/*.whl
+      - run: >-
+          /tmp/auditspec-consumer/bin/pip install dist/*.whl
+          langgraph==1.2.9 transitions==0.9.3
       - run: /tmp/auditspec-consumer/bin/auditctl examples/payment.yaml summary
       - run: /tmp/auditspec-consumer/bin/auditvault --help
+      - run: >-
+          /tmp/auditspec-consumer/bin/python -c
+          "from auditspec.adapter_registry import registry_attestation_status;
+          assert registry_attestation_status() == (True, ())"
+      - run: >-
+          /tmp/auditspec-consumer/bin/python -c
+          "from auditspec.runtime.payment_graph import run_payment_fixture;
+          from pathlib import Path;
+          result, sink = run_payment_fixture({'run_id':'wheel-consumer'},
+          db_path=Path('/tmp/auditspec-wheel-consumer.sqlite'),
+          enabled_mechanisms={'canonical_action'});
+          assert result['run_id'] == 'wheel-consumer' and len(sink.events) == 1"

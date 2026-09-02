@@ -1,0 +1,30 @@
+{
+  "schema": "AuditSpec-adapter-registry-attestation-v3",
+  "layout": "installed_package",
+  "registry_schema": "AuditSpec-adapter-registry-v1",
+  "registry_sha256": "ce31f5510caa4aa512080e61db85f48f01e5b24dfeb395c8fbf2228bdf1d8926",
+  "verifier": "auditspec.adapter_registry:registry_attestation_status",
+  "evidence": {
+    "files": {
+      "model.py": "9ecbb2948e0791941032cc10ea8ff8b158b7e623a2c84c6b51e5e3bea50879e8",
+      "compiler.py": "978c6ba47aa5c20e5536934bd9964c4adb6f19cda0b0dd1eb1cceab906eeff8c",
+      "adapter_registry.py": "015b99b6d31e3bfe33f83adefcbb4fba7a84121bfc5c3e6e9c5dfc0c3722e353",
+      "runtime/conformance.py": "b1843b783e3556f64ab5a63efa326b566867c3b28b96b5225dce589274608cfa",
+      "runtime/run_verification.py": "fdd15543d16412c8c9cc3b33b397ffe9aec4fa0893a4e0bb98d6505375eacfe9",
+      "runtime/evidence.py": "381cb662052724f1aa23753303f2491c9669d17275a71d673214d292114da821",
+      "runtime/planner.py": "f45e545ab71d2fe273d0855810fc155826b0fcb17f28083426cecc3b678ecac3",
+      "runtime/payment_graph.py": "189019c9916fddb243174210d046fb4e990c3dd327672e20818ae764aa5ec234",
+      "runtime/replay.py": "c289abbae7e6871d40b574a082e8562b4eff9faff28a27e0e74fed9f7136e67b",
+      "runtime/credit_graph.py": "09f06b333fc7c3c28bee48b9ae312685d06628f51cad989234fb3e5384970468",
+      "runtime/credit_replay.py": "9229a90907404d2f9d24d8d7ae51390f7ae45a7c4caaba7961bc7d213cd35f0a",
+      "runtime/replay_proof.py": "bfa7fcba5529a492a5f781ba20719940d6440c82238631fa28f6f9d5e2d33d42",
+      "runtime/attacks.py": "f1b75f25015054e628dd95edee619888658bc06a2a045f771c7440fa09c4043b",
+      "data/examples/payment.yaml": "1da539d1cf4d72157b25f83f77a15bcf97b557bb5118cb07050c3a6ed3967d4b",
+      "data/examples/credit.yaml": "7fdb62ed2a413fb23a356bdc0f3cb8f963a6ac82f5cd30151137e7c7e38e976c"
+    },
+    "test_command": "isolated wheel consumer and runtime smoke",
+    "expected_test_scope": "compiler, certificate, topology, adapter, runtime, replay, and adversarial conformance"
+  },
+  "scope": "Binds the installed adapter registry to the implementation and example bytes shipped in the wheel.",
+  "limitation": "This local integrity attestation is not an external certification or hardware root of trust."
+}

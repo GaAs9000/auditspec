@@ -1,0 +1,391 @@
+name: payment-mechanism-lab
+description: Bounded payment-agent model with authority, approval, policy, durable effects, coverage, and typed replay.
+metadata:
+  domain: finance-payment
+  anchor_entity: action
+  identity_facts: [amount]
+  catalog_version: 2026-08-14-v1
+  runtime_fixture: langgraph-sqlite-payment
+  baselines:
+    final_only: [final_output]
+    generic_trace: [final_output, generic_agent_trace]
+    fixed_receipts: [canonical_action, approval_bound_receipt, durable_effect_receipt]
+    delegation_dual_graph: [canonical_action, delegation_context, gateway_coverage]
+    full_policy_environment: [canonical_action, delegation_context, policy_snapshot, approval_bound_receipt, gateway_coverage, generic_agent_trace]
+    retain_all_passive: [final_output, generic_agent_trace, canonical_action, approval_bound_receipt, delegation_context, policy_snapshot, model_advice, human_decision_record, durable_effect_receipt, gateway_coverage, coarse_amount_channel, coarse_policy_channel, amount_token, policy_state_token]
+
+variables:
+  amount: [50, 150]
+  approval_limit: [100]
+  approval_signature_valid: [false, true]
+  approval_action_bound: [false, true]
+  delegation_scope_payment: [false, true]
+  delegation_executor_bound: [false, true]
+  policy_limit: [100, 200]
+  policy_effective: [false, true]
+  model_recommendation: [approve, deny]
+  human_decision: [approve, deny]
+  tool_response: [success, timeout]
+  ledger_commit_count: [0, 1, 2]
+  gateway_coverage_complete: [false, true]
+  duplicate_without_tool_response: [false, true]
+
+constraints:
+  - "ledger_commit_count == 2 or not duplicate_without_tool_response"
+
+facts:
+  amount: {domain: execution, entity: action, sensitivity: 2}
+  approval_limit: {domain: approval, entity: approval, sensitivity: 1}
+  approval_signature_valid: {domain: approval, entity: approval, sensitivity: 1}
+  approval_action_bound: {domain: approval, entity: approval, sensitivity: 1}
+  delegation_scope_payment: {domain: authority, entity: delegation, sensitivity: 2}
+  delegation_executor_bound: {domain: authority, entity: delegation, sensitivity: 2}
+  policy_limit: {domain: policy, entity: policy_version, sensitivity: 0}
+  policy_effective: {domain: policy, entity: policy_version, sensitivity: 0}
+  model_recommendation: {domain: human, entity: review, sensitivity: 2}
+  human_decision: {domain: human, entity: review, sensitivity: 2}
+  tool_response: {domain: execution, entity: action, sensitivity: 1}
+  ledger_commit_count: {domain: effect, entity: ledger_transaction, sensitivity: 3}
+  gateway_coverage_complete:
+    domain: execution
+    entity: action
+    sensitivity: 0
+    negative_evidence_channel: tool_dispatch
+  duplicate_without_tool_response: {domain: replay, entity: replay_run, sensitivity: 3}
+
+queries:
+  transfer_authorized:
+    split: development
+    kind: authorization
+    expression: "amount <= approval_limit and approval_signature_valid and approval_action_bound and delegation_scope_payment and delegation_executor_bound"
+    description: Was the executed transfer covered by a valid action-bound approval and delegation?
+  policy_compliant:
+    split: development
+    kind: compliance
+    expression: "policy_effective and amount <= policy_limit"
+    description: Did the action satisfy the policy version effective at execution?
+  settled_exactly_once:
+    split: development
+    kind: fact
+    expression: "ledger_commit_count == 1"
+    description: Did the durable ledger contain exactly one settlement?
+  human_override_occurred:
+    split: development
+    kind: attribution
+    expression: "model_recommendation != human_decision"
+    description: Did the human decision override the model recommendation?
+  report_matches_ledger:
+    split: development
+    kind: fact
+    expression: "(tool_response == 'success') == (ledger_commit_count >= 1)"
+    description: Did the terminal tool status agree with durable business state?
+  delegation_attributable:
+    split: development
+    kind: attribution
+    expression: "delegation_scope_payment and delegation_executor_bound"
+    description: Can the transfer be attributed to a payment-scoped delegation and executor?
+  approval_applied_to_executed_action:
+    split: held_out
+    kind: authorization
+    expression: "approval_signature_valid and approval_action_bound"
+    description: Was the approval both authentic and bound to this executed action?
+  no_out_of_band_effect:
+    split: held_out
+    kind: coverage
+    expression: "gateway_coverage_complete"
+    description: Did every effect-bearing call traverse the declared gateway channel?
+  excessive_transfer:
+    split: held_out
+    kind: compliance
+    expression: "amount > policy_limit"
+    description: Was the transfer above the effective policy limit?
+  tool_response_necessary_for_duplicate:
+    split: held_out
+    kind: causality
+    intervention_target: omit_tool_response
+    expression: "ledger_commit_count == 2 and not duplicate_without_tool_response"
+    description: Did targeted omission of the tool response remove an actual duplicate effect?
+
+mechanisms:
+  final_output:
+    mode: passive
+    producer: agent
+    capture_point: agent
+    trust_class: agent_asserted
+    facts: [tool_response]
+    integrity: none
+    adapter: agent-final
+    capture: final tool-facing status
+    cost: {bytes: 84, privacy: 1, latency_ms: 0.00, fragility: 3}
+  generic_agent_trace:
+    mode: passive
+    producer: framework_runtime
+    capture_point: framework_runtime
+    trust_class: runtime_observed
+    facts: [tool_response, model_recommendation, human_decision]
+    binding_edges: [action->review]
+    integrity: hash_chain
+    adapter: langgraph-node-trace
+    capture: node names, state transitions, and agent-emitted values
+    cost: {bytes: 620, privacy: 4, latency_ms: 0.06, fragility: 2}
+  canonical_action:
+    mode: passive
+    producer: action_gateway
+    capture_point: action_gateway
+    trust_class: gateway_bound
+    facts: [amount]
+    integrity: hmac-sha256
+    adapter: canonical-action
+    capture: action id, normalized transfer amount, and digest
+    cost: {bytes: 238, privacy: 2, latency_ms: 0.05, fragility: 1}
+  approval_bound_receipt:
+    mode: passive
+    producer: approval_service
+    capture_point: approval_service
+    trust_class: signed_service
+    facts: [approval_limit, approval_signature_valid, approval_action_bound]
+    capabilities: [bind:execution:approval]
+    binding_edges: [action->approval]
+    requires: [canonical_action]
+    integrity: hmac-sha256
+    adapter: approval-receipt
+    capture: approval decision, action digest, signature verification
+    cost: {bytes: 286, privacy: 2, latency_ms: 0.08, fragility: 1}
+  delegation_context:
+    mode: passive
+    producer: identity_gateway
+    capture_point: identity_gateway
+    trust_class: gateway_bound
+    facts: [delegation_scope_payment, delegation_executor_bound]
+    capabilities: [bind:execution:authority]
+    binding_edges: [action->delegation]
+    requires: [canonical_action]
+    integrity: hmac-sha256
+    adapter: delegation-cim
+    capture: delegation id, scope, authenticated principal, executor binding
+    cost: {bytes: 260, privacy: 3, latency_ms: 0.07, fragility: 1}
+  policy_snapshot:
+    mode: passive
+    producer: policy_registry
+    capture_point: policy_registry
+    trust_class: signed_service
+    facts: [policy_limit, policy_effective]
+    capabilities: [bind:execution:policy]
+    binding_edges: [action->policy_version]
+    requires: [canonical_action]
+    integrity: hmac-sha256
+    adapter: policy-snapshot
+    capture: policy hash, effective interval, evaluated limit
+    cost: {bytes: 274, privacy: 1, latency_ms: 0.09, fragility: 1}
+  model_advice:
+    mode: passive
+    producer: model_gateway
+    capture_point: model_gateway
+    trust_class: runtime_observed
+    facts: [model_recommendation]
+    capabilities: [bind:execution:human]
+    binding_edges: [action->review]
+    requires: [canonical_action]
+    integrity: hash_chain
+    adapter: model-advice
+    capture: pre-review recommendation bound to action id
+    cost: {bytes: 190, privacy: 3, latency_ms: 0.04, fragility: 2}
+  human_decision_record:
+    mode: passive
+    producer: approval_service
+    capture_point: approval_service
+    trust_class: signed_service
+    facts: [human_decision]
+    capabilities: [bind:execution:human]
+    binding_edges: [action->review]
+    requires: [canonical_action]
+    integrity: hmac-sha256
+    adapter: human-review
+    capture: final human disposition bound to action id
+    cost: {bytes: 204, privacy: 2, latency_ms: 0.07, fragility: 1}
+  durable_effect_receipt:
+    mode: passive
+    producer: ledger
+    capture_point: ledger
+    trust_class: durable_service
+    facts: [ledger_commit_count]
+    capabilities: [bind:execution:effect]
+    binding_edges: [action->ledger_transaction]
+    requires: [canonical_action]
+    integrity: hmac-sha256
+    adapter: sqlite-ledger-receipt
+    capture: committed transaction identifiers and action digest
+    cost: {bytes: 312, privacy: 4, latency_ms: 0.13, fragility: 1}
+  gateway_coverage:
+    mode: passive
+    producer: action_gateway
+    capture_point: action_gateway
+    trust_class: gateway_bound
+    facts: [gateway_coverage_complete]
+    requires: [canonical_action]
+    coverage_channel: tool_dispatch
+    integrity: hmac-sha256
+    adapter: gateway-coverage
+    capture: mandatory-routing declaration and bypass counter
+    cost: {bytes: 142, privacy: 0, latency_ms: 0.02, fragility: 1}
+  coarse_amount_channel:
+    mode: passive
+    producer: action_gateway
+    capture_point: action_gateway
+    trust_class: gateway_bound
+    observations:
+      - name: amount_redacted
+        kind: bucket
+        sources: [amount]
+        parameters: {boundaries: [], labels: [redacted]}
+        output_type: bucket
+        entity: action
+    integrity: hmac-sha256
+    adapter: coarse-bucket
+    capture: redacted amount class that intentionally loses all magnitude information
+    cost: {bytes: 34, privacy: 0, latency_ms: 0.01, fragility: 1}
+  coarse_policy_channel:
+    mode: passive
+    producer: policy_registry
+    capture_point: policy_registry
+    trust_class: signed_service
+    binding_edges: [action->policy_version]
+    observations:
+      - name: policy_limit_redacted
+        kind: bucket
+        sources: [policy_limit]
+        parameters: {boundaries: [], labels: [redacted]}
+        output_type: bucket
+        entity: policy_version
+      - name: policy_effective_present
+        kind: presence
+        sources: [policy_effective]
+        output_type: boolean
+        entity: policy_version
+    integrity: hmac-sha256
+    adapter: coarse-bucket
+    capture: action-bound but deliberately lossy policy metadata
+    cost: {bytes: 48, privacy: 0, latency_ms: 0.01, fragility: 1}
+  amount_token:
+    mode: passive
+    producer: action_gateway
+    capture_point: action_gateway
+    trust_class: gateway_bound
+    observations:
+      - name: amount_domain_token
+        kind: digest
+        sources: [amount]
+        parameters: {namespace: payment-amount-v1}
+        output_type: digest
+        entity: action
+    integrity: hmac-sha256
+    adapter: digest-token
+    capture: deterministic bounded-domain token for the normalized amount
+    cost: {bytes: 96, privacy: 1, latency_ms: 0.02, fragility: 1}
+  policy_state_token:
+    mode: passive
+    producer: policy_registry
+    capture_point: policy_registry
+    trust_class: signed_service
+    binding_edges: [action->policy_version]
+    observations:
+      - name: policy_state_domain_token
+        kind: digest
+        sources: [policy_limit, policy_effective]
+        parameters: {namespace: payment-policy-state-v1}
+        output_type: digest
+        entity: policy_version
+    integrity: hmac-sha256
+    adapter: digest-token
+    capture: action-bound token for the effective bounded policy state
+    cost: {bytes: 112, privacy: 1, latency_ms: 0.03, fragility: 1}
+  virtualized_tool_omission_replay:
+    mode: active
+    producer: audit_sandbox
+    capture_point: audit_sandbox
+    trust_class: isolated_replay
+    facts: [duplicate_without_tool_response]
+    capabilities: [bind:execution:replay]
+    binding_edges: [action->replay_run]
+    requires: [canonical_action, durable_effect_receipt, generic_agent_trace]
+    integrity: hmac-sha256
+    adapter: sqlite-counterfactual-replay
+    capture: offline database snapshot, targeted omitted response, ledger verifier
+    cost: {bytes: 980, privacy: 4, latency_ms: 4.50, fragility: 3}
+    replay:
+      target: omit_tool_response
+      prefix_checkpoint: before_effect
+      snapshot: sqlite_backup
+      nondeterminism: [agent_decision, tool_response, clock]
+      isolation: offline_temp_database
+      side_effect_mode: virtualized
+      verifier: ledger_loss_predicate
+      min_trials: 1
+  irreversible_wire_replay:
+    mode: active
+    producer: audit_sandbox
+    capture_point: audit_sandbox
+    trust_class: isolated_replay
+    facts: [duplicate_without_tool_response]
+    capabilities: [bind:execution:replay]
+    binding_edges: [action->replay_run]
+    requires: [canonical_action, durable_effect_receipt]
+    integrity: hmac-sha256
+    adapter: external-wire-replay
+    capture: declared external wire rerun
+    cost: {bytes: 400, privacy: 2, latency_ms: 1.00, fragility: 5}
+    replay:
+      target: omit_tool_response
+      prefix_checkpoint: before_effect
+      snapshot: external_bank_state
+      nondeterminism: [tool_response]
+      isolation: production_wire_network
+      side_effect_mode: irreversible
+      verifier: external_balance_diff
+      min_trials: 1
+
+topology:
+  nodes: [agent, framework_runtime, action_gateway, ledger]
+  edges:
+    - [agent, framework_runtime]
+    - [framework_runtime, action_gateway]
+    - [action_gateway, ledger]
+  channels:
+    tool_dispatch:
+      sources: [agent, framework_runtime]
+      sinks: [ledger]
+      mediator: action_gateway
+
+threat_models:
+  cooperative:
+    trusted_capture_points: [agent, framework_runtime, action_gateway, approval_service, identity_gateway, policy_registry, model_gateway, ledger, audit_sandbox]
+    accepted_integrity: [none, hash_chain, hmac-sha256]
+    mandatory_channels: [tool_dispatch]
+  adversarial_agent:
+    compromised_producers: [agent]
+    trusted_capture_points: [framework_runtime, action_gateway, approval_service, identity_gateway, policy_registry, model_gateway, ledger, audit_sandbox]
+    accepted_integrity: [hash_chain, hmac-sha256]
+    mandatory_channels: [tool_dispatch]
+  external_forensics:
+    compromised_producers: [agent, model_gateway]
+    trusted_capture_points: [action_gateway, approval_service, identity_gateway, policy_registry, ledger, audit_sandbox]
+    accepted_integrity: [hmac-sha256]
+    mandatory_channels: [tool_dispatch]
+  best_effort_gateway:
+    compromised_producers: [agent]
+    trusted_capture_points: [framework_runtime, action_gateway, approval_service, identity_gateway, policy_registry, model_gateway, ledger, audit_sandbox]
+    accepted_integrity: [hash_chain, hmac-sha256]
+    mandatory_channels: []
+    bypass_edges: [[framework_runtime, ledger]]
+  no_replay:
+    compromised_producers: [agent]
+    trusted_capture_points: [framework_runtime, action_gateway, approval_service, identity_gateway, policy_registry, model_gateway, ledger]
+    accepted_integrity: [hash_chain, hmac-sha256]
+    mandatory_channels: [tool_dispatch]
+    available_mechanisms: [generic_agent_trace, canonical_action, approval_bound_receipt, delegation_context, policy_snapshot, model_advice, human_decision_record, durable_effect_receipt, gateway_coverage]
+  irreversible_only:
+    compromised_producers: [agent]
+    trusted_capture_points: [framework_runtime, action_gateway, approval_service, identity_gateway, policy_registry, model_gateway, ledger, audit_sandbox]
+    accepted_integrity: [hash_chain, hmac-sha256]
+    mandatory_channels: [tool_dispatch]
+    available_mechanisms: [generic_agent_trace, canonical_action, approval_bound_receipt, delegation_context, policy_snapshot, model_advice, human_decision_record, durable_effect_receipt, gateway_coverage, irreversible_wire_replay]

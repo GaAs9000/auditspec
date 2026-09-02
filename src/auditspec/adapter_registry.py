@@ -11,12 +11,19 @@ from .runtime.events import canonical_json
 
 
 ADAPTER_REGISTRY_VERSION = "AuditSpec-adapter-registry-v1"
-REGISTRY_ATTESTATION_SCHEMA = "AuditSpec-adapter-registry-attestation-v2"
-REGISTRY_ATTESTATION_PATH = (
+REGISTRY_ATTESTATION_SCHEMA = "AuditSpec-adapter-registry-attestation-v3"
+SOURCE_REGISTRY_ATTESTATION_PATH = (
     Path(__file__).resolve().parents[2]
     / "proofs"
     / "adapter_registry_attestation.json"
 )
+PACKAGE_REGISTRY_ATTESTATION_PATH = (
+    Path(__file__).resolve().parent
+    / "data"
+    / "adapter_registry_attestation.json"
+)
+# Compatibility alias for callers that inspect the source-tree proof path.
+REGISTRY_ATTESTATION_PATH = SOURCE_REGISTRY_ATTESTATION_PATH
 
 
 @dataclass(frozen=True)
@@ -384,7 +391,15 @@ def registry_digest() -> str:
 
 def registry_attestation_status() -> tuple[bool, tuple[str, ...]]:
     try:
-        raw = json.loads(REGISTRY_ATTESTATION_PATH.read_text(encoding="utf-8"))
+        if SOURCE_REGISTRY_ATTESTATION_PATH.is_file():
+            attestation_path = SOURCE_REGISTRY_ATTESTATION_PATH
+            evidence_root = Path(__file__).resolve().parents[2]
+            expected_layout = "source_tree"
+        else:
+            attestation_path = PACKAGE_REGISTRY_ATTESTATION_PATH
+            evidence_root = Path(__file__).resolve().parent
+            expected_layout = "installed_package"
+        raw = json.loads(attestation_path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return False, ("missing:adapter_registry_attestation",)
     except (OSError, json.JSONDecodeError):
@@ -394,6 +409,8 @@ def registry_attestation_status() -> tuple[bool, tuple[str, ...]]:
         reasons.append("mismatch:adapter_registry_attestation_schema")
     if raw.get("registry_schema") != ADAPTER_REGISTRY_VERSION:
         reasons.append("mismatch:adapter_registry_schema")
+    if raw.get("layout") != expected_layout:
+        reasons.append("mismatch:adapter_registry_attestation_layout")
     if raw.get("registry_sha256") != registry_digest():
         reasons.append("mismatch:adapter_registry_digest")
     if raw.get("verifier") != "auditspec.adapter_registry:registry_attestation_status":
@@ -406,9 +423,8 @@ def registry_attestation_status() -> tuple[bool, tuple[str, ...]]:
         if not isinstance(files, Mapping) or not files:
             reasons.append("missing:adapter_registry_evidence_files")
         else:
-            project_root = Path(__file__).resolve().parents[2]
             for relative, expected in sorted(files.items()):
-                path = project_root / str(relative)
+                path = evidence_root / str(relative)
                 try:
                     actual = hashlib.sha256(path.read_bytes()).hexdigest()
                 except OSError:

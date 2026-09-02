@@ -43,7 +43,9 @@ class CreditState(TypedDict, total=False):
 
 @lru_cache(maxsize=1)
 def _credit_spec() -> AuditSpec:
-    return load_spec(Path(__file__).resolve().parents[3] / "examples" / "credit.yaml")
+    source_path = Path(__file__).resolve().parents[3] / "examples" / "credit.yaml"
+    package_path = Path(__file__).resolve().parents[1] / "data" / "examples" / "credit.yaml"
+    return load_spec(source_path if source_path.is_file() else package_path)
 
 
 def _application_identity(state: CreditState) -> tuple[str, str]:
