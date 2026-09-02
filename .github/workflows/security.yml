@@ -16,6 +16,10 @@ jobs:
   dependency-audit:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      checks: write
+      issues: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -26,8 +30,10 @@ jobs:
       - run: python -m pip_audit -r security/requirements-audit.txt
       - run: python -m build
       - run: python -m twine check dist/*
-      - run: cargo install cargo-audit --locked --version 0.22.2
-      - run: cargo audit --file rust/auditspec/Cargo.lock
+      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          working-directory: rust/auditspec
 
   codeql:
     runs-on: ubuntu-latest
